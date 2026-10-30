@@ -5,7 +5,7 @@ from django.utils.safestring import mark_safe
 
 from ..models import Post
 from ..services import cache as cache_service
-from ..services import ranking, recommend
+from ..services import notifications, ranking, recommend
 from ..visitors import get_visitor_id
 
 register = template.Library()
@@ -50,6 +50,11 @@ def get_recommendations(context, count=5):
     if request is None:
         return []
     return recommend.recommend_posts(get_visitor_id(request), count)
+
+
+@register.simple_tag
+def unread_notifications(user):
+    return notifications.unread_count(user.id)
 
 
 @register.filter(name='markdown')

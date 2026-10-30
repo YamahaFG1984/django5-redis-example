@@ -89,7 +89,7 @@
     <rect class="hash" x="10" y="220" width="130" height="30" rx="6"/><text x="20" y="240">post:7 → 40</text>
     <rect class="hash" x="150" y="220" width="140" height="30" rx="6"/><text x="160" y="240">post:8 → 155</text>
     <rect class="hash" x="300" y="220" width="130" height="30" rx="6"/><text x="310" y="240">post:3 → 12</text>
-    <text class="lbl" x="445" y="240">ZSCORE 查哈希表 O(1)；ZRANGE 走跳表 O(log N + M)</text>
+    <text class="lbl" x="445" y="232">ZSCORE 查哈希表：O(1)</text><text class="lbl" x="445" y="248">ZRANGE 走跳表：O(log N + M)</text>
   </svg>
   </div>
   <figcaption>图 1　ZSET = 跳表 + 哈希表。高层的链接可以跳过多个节点，所以查找、插入、取排名都是 O(log N)</figcaption>

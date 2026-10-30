@@ -1,0 +1,19 @@
+{% extends "blog/base.html" %}
+
+{% block title %}Notifications{% endblock %}
+
+{% block content %}
+  <h1>Notifications</h1>
+  {% for m in messages_list %}
+    <div class="comment">
+      <p class="info">{{ m.name }} commented on <a href="{{ m.url }}">{{ m.post_title }}</a></p>
+      <p>{{ m.excerpt }}</p>
+    </div>
+  {% empty %}
+    <p>No notifications yet.</p>
+  {% endfor %}
+  <p class="stats">
+    Comment event stream: {{ stream.length }} event{{ stream.length|pluralize }},
+    {{ stream.pending }} waiting for acknowledgement.
+  </p>
+{% endblock %}

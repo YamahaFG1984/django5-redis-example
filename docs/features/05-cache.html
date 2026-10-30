@@ -82,7 +82,7 @@ sequenceDiagram
   B->>DB: UPDATE title = Y
   B->>C: SET title = Y
   A->>C: SET title = X（A 的网络慢了一点）
-  Note over DB,C: 数据库是 Y，缓存是 X，一直不一致直到过期 ❌
+  Note over DB,C: DB = Y，缓存 = X ❌
   </pre></div>
   <figcaption>图 2　「更新缓存」在并发写时可能留下旧值。「删除缓存」不管谁后执行，结果都是缓存为空，下次读取时重新加载</figcaption>
 </figure>

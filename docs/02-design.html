@@ -119,6 +119,7 @@ flowchart TB
 ├── management/commands/
 │   ├── seed_demo.py         # 演示数据
 │   ├── sync_post_views.py   # 浏览量回写数据库
+│   ├── simulate_views.py    # 生成模拟浏览数据（演示排行榜）
 │   ├── rebuild_redis_index.py # 从数据库重建索引类数据
 │   └── notify_worker.py     # Stream 消费者
 └── tests/                   # 每个功能一个测试文件
@@ -151,6 +152,7 @@ flowchart TB
     <tr><td><code>blog:user:{id}:likes</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>06</td><td>用户点赞过的文章（按时间）</td></tr>
     <tr><td><code>blog:checkin:{uid}:{yyyymm}</code></td><td><span class="t bitmap">BITMAP</span></td><td>400 天</td><td>07</td><td>用户月签到日历</td></tr>
     <tr><td><code>blog:checkin:day:{yyyymmdd}</code></td><td><span class="t bitmap">BITMAP</span></td><td>40 天</td><td>07</td><td>全站每日签到（offset = 用户 ID）</td></tr>
+    <tr><td><code>blog:checkin:week:{yyyymmdd}</code></td><td><span class="t bitmap">BITMAP</span></td><td>60 秒</td><td>07</td><td>BITOP AND 的临时结果（7 天全勤）</td></tr>
     <tr><td><code>blog:user:{id}:checkin</code></td><td><span class="t hash">HASH</span></td><td>永久</td><td>07</td><td>累计天数 / 连续天数 / 最后日期 / 积分</td></tr>
     <tr><td><code>blog:user:{id}:following</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我关注的人</td></tr>
     <tr><td><code>blog:user:{id}:followers</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我的粉丝</td></tr>

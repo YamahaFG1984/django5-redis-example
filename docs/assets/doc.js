@@ -29,7 +29,9 @@
       var heads = document.querySelectorAll('main h2[id], main h3[id]');
       var html = '<div class="toc-title">本页目录</div>';
       heads.forEach(function (h) {
-        html += '<a class="' + h.tagName.toLowerCase() + '" href="#' + h.id + '">' + h.textContent + '</a>';
+        var num = h.querySelector('.num');
+        var text = num ? num.textContent + '. ' + h.textContent.slice(num.textContent.length) : h.textContent;
+        html += '<a class="' + h.tagName.toLowerCase() + '" href="#' + h.id + '">' + text + '</a>';
       });
       toc.innerHTML = html;
       var links = toc.querySelectorAll('a');
@@ -58,7 +60,9 @@
         sequence: { mirrorActors: false, showSequenceNumbers: true },
         flowchart: { curve: 'basis' }
       });
-      window.mermaid.run({ querySelector: '.mermaid' });
+      // 等网络字体加载完再渲染：否则 Mermaid 按后备字体测量文字宽度，节点里的中文会被截断
+      var ready = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();
+      ready.then(function () { window.mermaid.run({ querySelector: '.mermaid' }); });
     }
   });
 })();

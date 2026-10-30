@@ -25,6 +25,7 @@ from .services import (
     pageviews,
     ranking,
     recommend,
+    notifications,
     search,
     timeline,
 )
@@ -363,5 +364,17 @@ def my_timeline(request):
             'next_before': repr(next_before) if next_before is not None else None,
             'counts': timeline.follow_counts(request.user.id),
             'mutual': timeline.mutual_follows(request.user.id),
+        },
+    )
+
+
+@login_required
+def my_notifications(request):
+    return render(
+        request,
+        'blog/notifications.html',
+        {
+            'messages_list': notifications.inbox(request.user.id),
+            'stream': notifications.stream_stats(),
         },
     )

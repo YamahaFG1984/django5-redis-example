@@ -33,6 +33,16 @@ services:
     environment:
       PYTHONPATH: "/code/mysite"
       DJANGO_SETTINGS_MODULE: "mysite.settings"
+  web_worker:
+    extends:
+      service: web
+    # step-12 后台消费评论事件，给作者发送站内信
+    command: python /code/mysite/manage.py notify_worker
+    restart: always
+    depends_on:
+      - db
+      - redis
+      - web_migrate
   db:
     image: postgres:16.2
     restart: always

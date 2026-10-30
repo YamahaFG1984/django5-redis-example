@@ -177,3 +177,19 @@ def search_history(visitor_id):
 def search_suggest():
     """ZSET  标题联想索引：score 全为 0，member = "小写标题|文章 ID"，按字典序排列"""
     return _k('search', 'suggest')
+
+
+# ---------------------------------------------------------------- step-12 评论通知
+def stream_comments():
+    """STREAM  评论事件，约保留最近 1 万条；消费组 notifier"""
+    return _k('stream', 'comments')
+
+
+def user_inbox(user_id):
+    """LIST  站内信（JSON 字符串），最新的在左边，最多 50 条"""
+    return _k('user', user_id, 'inbox')
+
+
+def user_unread(user_id):
+    """STRING  未读通知数"""
+    return _k('user', user_id, 'unread')

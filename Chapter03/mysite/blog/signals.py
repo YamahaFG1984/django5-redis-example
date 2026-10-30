@@ -1,12 +1,13 @@
 """
 模型变化时同步 Redis 中的派生数据。每一章在这里添加自己的处理函数。
 """
+from django.db import transaction
 from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 from .models import Comment, Post
 from .services import cache as cache_service
-from .services import likes, ranking, recommend, search, timeline
+from .services import likes, notifications, ranking, recommend, search, timeline
 
 
 @receiver(pre_save, sender=Post)
@@ -64,3 +65,10 @@ def post_tags_changed(sender, instance, action, **kwargs):
 def comment_changed(sender, instance, **kwargs):
     # step-05 评论数变了，「评论最多」的侧边栏要刷新
     cache_service.invalidate_sidebar()
+
+
+@receiver(post_save, sender=Comment)
+def comment_created(sender, instance, created, **kwargs):
+    if created and instance.active:
+        # step-12 事务提交之后再发事件：否则 worker 可能比数据库提交还快，查不到这条评论
+        transaction.on_commit(lambda: notifications.publish_comment(instance))

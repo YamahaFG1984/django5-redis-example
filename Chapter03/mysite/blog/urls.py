@@ -40,4 +40,5 @@ urlpatterns = [
         name='author_follow',
     ),
     path('timeline/', views.my_timeline, name='my_timeline'),
+    path('notifications/', views.my_notifications, name='my_notifications'),
 ]
