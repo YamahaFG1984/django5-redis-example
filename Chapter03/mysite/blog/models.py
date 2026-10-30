@@ -36,6 +36,8 @@ class Post(models.Model):
         choices=Status,
         default=Status.DRAFT
     )
+    # Persisted copy of the view counter kept in Redis (synced periodically)
+    views = models.PositiveIntegerField(default=0)
 
     objects = models.Manager()  # The default manager.
     published = PublishedManager()  # Our custom manager.

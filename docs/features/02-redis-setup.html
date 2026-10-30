@@ -169,7 +169,28 @@ from django.conf import settings
 
 
 def _k(*parts):
-    return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])</code></pre>
+    return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])
+
+
+# ---------------------------------------------------------------- step-03 浏览量
+def post_views(post_id):
+    """STRING  文章 PV 计数"""
+    return _k('post', post_id, 'views')
+
+
+def post_uv(post_id):
+    """HYPERLOGLOG  文章 UV（独立访客数）"""
+    return _k('post', post_id, 'uv')
+
+
+def post_seen(post_id, visitor_id):
+    """STRING  防刷标记：某访客最近看过某文章，TTL 30 分钟"""
+    return _k('post', post_id, 'seen', visitor_id)
+
+
+def post_views_dirty():
+    """SET  浏览量有变化、等待回写数据库的文章 ID"""
+    return _k('post', 'views', 'dirty')</code></pre>
 <p>这一章只有一个辅助函数 <code>_k()</code>。从下一章开始，每个功能都会在这里添加自己的 Key 函数，例如：</p>
 <pre><code class="language-python">def post_views(post_id):          # step-03
     return _k('post', post_id, 'views')      # blog:post:42:views
@@ -227,7 +248,31 @@ class RedisTestCase(TestCase):
     def setUp(self):
         super().setUp()
         self.redis = get_redis()
-        self.redis.flushdb()</code></pre>
+        self.redis.flushdb()
+
+
+def make_user(username='alice'):
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_user(username, password='redis123')
+
+
+def make_post(title='Hello Redis', author=None, tags=(), **fields):
+    from django.utils.text import slugify
+
+    from blog.models import Post
+
+    post = Post.objects.create(
+        title=title,
+        slug=slugify(title),
+        author=author or make_user(f'author-{slugify(title)}'),
+        body='Demo body',
+        status=fields.pop('status', Post.Status.PUBLISHED),
+        **fields,
+    )
+    if tags:
+        post.tags.set(tags)
+    return post</code></pre>
 <p>原来的 <code>blog/tests.py</code> 改成了 <code>blog/tests/</code> 包，后面每一章一个测试文件。</p>
 <pre data-file="Chapter03/mysite/blog/tests/test_redis_setup.py"><code class="language-python" data-include="Chapter03/mysite/blog/tests/test_redis_setup.py::RedisSetupTests">class RedisSetupTests(RedisTestCase):
     def test_uses_test_database(self):

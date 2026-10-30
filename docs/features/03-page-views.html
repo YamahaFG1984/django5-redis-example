@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文章浏览量 PV/UV</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 03 · 计数器</div>
+  <h1>文章浏览量：PV、UV 与防刷</h1>
+  <p class="lead">文章页显示「123 次浏览 · 45 位读者」。这个需求涉及 Redis 的几个常见用法：原子计数、带过期时间的去重标记、HyperLogLog 基数统计，以及先写 Redis 再定时回写数据库。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-03-page-views</span>
+    <span class="t string">STRING</span><span class="t hll">HLL</span><span class="t set">SET</span>
+  </div>
+</section>
+
+<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<h3 id="req">1.1 需求回顾（PRD F1）</h3>
+<ul>
+  <li>详情页显示 PV（浏览次数）和 UV（独立读者数），列表页显示每篇的 PV；</li>
+  <li>同一访客 30 分钟内刷新只算 1 次；</li>
+  <li>浏览量要落到数据库，Redis 数据丢了也不能归零。</li>
+</ul>
+
+<h3 id="why-not-db">1.2 只用数据库会有什么问题</h3>
+<p>最直接的写法是每次打开文章执行 <code>UPDATE blog_post SET views = views + 1 WHERE id = 42</code>，问题有三个：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph DB["只用数据库"]
+    direction TB
+    R1["请求 1"] & R2["请求 2"] & R3["请求 3"] --> L["🔒 行锁<br/>id = 42"]
+    L --> W["UPDATE ... views+1<br/>写 WAL · 刷盘"]
+  end
+  subgraph RD["使用 Redis"]
+    direction TB
+    Q1["请求 1"] & Q2["请求 2"] & Q3["请求 3"] --> S["单线程依次执行<br/>INCR（内存操作，微秒级）"]
+    S -.每 5 分钟一次.-> B["批量 UPDATE<br/>回写数据库"]
+  end
+  </pre></div>
+  <figcaption>图 1　热门文章的并发更新会集中在同一行上；Redis 在内存中依次执行 INCR，再批量回写</figcaption>
+</figure>
+<ol>
+  <li><strong>行锁争用</strong>：热门文章的所有并发请求都要更新同一行，只能排队。</li>
+  <li><strong>读请求变成了写请求</strong>：看文章本来只需要读，现在每次都要写日志、刷盘。</li>
+  <li><strong>去重和 UV 难做</strong>：要判断「这个人 30 分钟内看过没有」，需要再建一张访问记录表。</li>
+</ol>
+
+<h2 id="choose"><span class="num">2</span>方案选型</h2>
+<h3 id="choose-pv">2.1 PV 计数用什么</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>方案</th><th>命令</th><th>优点</th><th>缺点</th></tr></thead>
+  <tbody>
+    <tr><td><strong>✓ 每篇文章一个 STRING</strong></td><td><code>INCR blog:post:42:views</code></td><td>最简单；列表页用 <code>MGET</code> 一次取多个</td><td>Key 数量 = 文章数</td></tr>
+    <tr><td>一个 HASH 存全部文章</td><td><code>HINCRBY blog:post:views 42 1</code></td><td>Key 少，小 Hash 很省内存</td><td>变成大 Key；不能对单个 field 设置过期</td></tr>
+    <tr><td>数据库</td><td><code>UPDATE … +1</code></td><td>不会丢数据</td><td>见上一节</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="choose-uv">2.2 UV 去重统计用什么</h3>
+<p>UV 就是「有多少个不同的人看过」，也就是集合的基数。假设一篇爆款文章有 100 万访客：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方案</th><th>内存（100 万访客）</th><th>准确度</th><th>能否知道某人看过没有</th></tr></thead>
+  <tbody>
+    <tr><td>SET 存所有访客 ID</td><td>约 60~90 MB（Session key 32 字节 + 元素开销）</td><td>精确</td><td>能，<code>SISMEMBER</code></td></tr>
+    <tr><td>BITMAP（offset = 用户 ID）</td><td>约 125 KB（ID 最大到 100 万）</td><td>精确</td><td>能，但只适用于整数 ID，匿名访客没法用</td></tr>
+    <tr><td><strong>✓ HyperLogLog</strong></td><td><strong>固定 12 KB</strong></td><td>标准误差 0.81%</td><td>不能</td></tr>
+  </tbody>
+</table></div>
+<p>UV 只用来展示，不需要精确，也不需要判断某个人是否看过，所以选 HyperLogLog。</p>
+
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  V["访客 ID<br/>'s:a1b2c3'"] --> H["64 位哈希<br/>0b0001 0110 ... 1000"]
+  H -->|低 14 位| IDX["桶编号<br/>0 ~ 16383"]
+  H -->|剩余位| Z["数从低位开始<br/>连续 0 的个数 + 1"]
+  IDX --> REG["16384 个寄存器<br/>每个 6 bit = 12KB"]
+  Z -->|只保留最大值| REG
+  REG --> EST["调和平均数<br/>→ 估算基数"]
+  </pre></div>
+  <figcaption>图 2　HyperLogLog 原理简图：只保存每个桶里见过的最大「连续零个数」，不保存元素本身，所以内存固定</figcaption>
+</figure>
+<div class="callout info">
+  <span class="label">直观理解</span>
+  <p>连抛硬币，如果你说「我最多一次连续抛出了 10 个反面」，别人可以推测你大概抛了 2<sup>10</sup> 轮左右。HyperLogLog 的估算思路与此类似，再用 16384 个桶取平均来降低误差。</p>
+</div>
+
+<h3 id="choose-dedup">2.3 防刷：30 分钟内只算一次</h3>
+<p>每个「文章 + 访客」组合对应一个带 30 分钟 TTL 的标记。<code>SET key 1 NX EX 1800</code> 一条命令同时完成「判断是否存在」和「写入并设置过期」，并且是原子的：</p>
+<div class="compare">
+  <div class="bad">
+    <h4>不要这样写（有竞态）</h4>
+<pre><code class="language-python">if not r.exists(key):      # 两个请求可能同时判断为不存在
+    r.set(key, 1, ex=1800)
+    r.incr(views_key)      # 结果计了两次</code></pre>
+  </div>
+  <div class="good">
+    <h4>应该这样写（原子）</h4>
+<pre><code class="language-python">if r.set(key, 1, nx=True, ex=1800):
+    r.incr(views_key)
+# NX：不存在才写，返回 True / None
+# EX：1800 秒后自动删除</code></pre>
+  </div>
+</div>
+
+<h2 id="keys"><span class="num">3</span>Key 设计</h2>
+<div class="keys">
+  <div class="rk">
+    <div class="rk-head"><span class="t string">STRING</span><code>blog:post:42:views</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-body"><span class="val">1024</span></div>
+    <div class="rk-note">PV 计数。INCR 自增，MGET 批量读。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t hll">HLL</span><code>blog:post:42:uv</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-body">PFCOUNT → <span class="val" style="color:var(--t-hll)">318</span></div>
+    <div class="rk-note">最大 12KB，内容不可读，只能 PFCOUNT。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t string">STRING</span><code>blog:post:42:seen:u:3</code><span class="ttl">TTL 1800s</span></div>
+    <div class="rk-body"><span class="val">1</span></div>
+    <div class="rk-note">防刷标记，过期自动删除。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:post:views:dirty</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">42</span><span class="chip">7</span><span class="chip">13</span></div></div>
+    <div class="rk-note">浏览量有变化的文章，等待回写数据库。</div>
+  </div>
+</div>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::L15-33"># ---------------------------------------------------------------- step-03 浏览量
+def post_views(post_id):
+    """STRING  文章 PV 计数"""
+    return _k('post', post_id, 'views')
+
+
+def post_uv(post_id):
+    """HYPERLOGLOG  文章 UV（独立访客数）"""
+    return _k('post', post_id, 'uv')
+
+
+def post_seen(post_id, visitor_id):
+    """STRING  防刷标记：某访客最近看过某文章，TTL 30 分钟"""
+    return _k('post', post_id, 'seen', visitor_id)
+
+
+def post_views_dirty():
+    """SET  浏览量有变化、等待回写数据库的文章 ID"""
+    return _k('post', 'views', 'dirty')</code></pre>
+
+<h2 id="flow"><span class="num">4</span>流程</h2>
+<h3 id="flow-record">4.1 一次浏览</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant B as 浏览器
+  participant V as post_detail 视图
+  participant R as Redis
+  B->>V: GET /blog/2026/10/30/hello-redis/
+  V->>V: get_visitor_id() → "u:3"
+  V->>R: SET blog:post:42:seen:u:3 1 NX EX 1800
+  alt 返回 OK（30 分钟内第一次访问）
+    V->>R: MULTI
+    V->>R: SET blog:post:42:views {post.views} NX
+    V->>R: INCR blog:post:42:views
+    V->>R: PFADD blog:post:42:uv u:3
+    V->>R: SADD blog:post:views:dirty 42
+    V->>R: EXEC（4 条命令一次发送）
+  else 返回 nil（30 分钟内看过）
+    Note over V: 不计数
+  end
+  V->>R: GET views · PFCOUNT uv
+  V-->>B: 页面显示 "1024 views · 318 readers"
+  </pre></div>
+  <figcaption>图 3　<code>record_view()</code> 的执行过程：除去最后的读取，一共 2 次网络往返</figcaption>
+</figure>
+
+<h3 id="flow-sync">4.2 回写数据库</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  CRON["⏰ cron 每 5 分钟<br/>manage.py sync_post_views"] --> SPOP["SPOP dirty 500<br/>弹出一批文章 ID"]
+  SPOP --> E{"弹出了 ID？"}
+  E -->|没有| DONE["结束"]
+  E -->|有| MGET["MGET 这些文章的 views"]
+  MGET --> BU["Post.objects.bulk_update<br/>一条 SQL 更新整批"]
+  BU --> SPOP
+  </pre></div>
+  <figcaption>图 4　只回写有变化的文章：dirty 集合记录了哪些文章需要回写，所以不用 SCAN 遍历所有 Key</figcaption>
+</figure>
+
+<h2 id="cli"><span class="num">5</span>用 redis-cli 体验核心命令</h2>
+<pre class="cli"><code><span class="prompt">&gt; </span>SET blog:post:42:seen:u:3 1 NX EX 1800
+<span class="out">OK</span>
+<span class="prompt">&gt; </span>SET blog:post:42:seen:u:3 1 NX EX 1800     <span class="cmt"># 已经存在 → 不写入</span>
+<span class="out">(nil)</span>
+<span class="prompt">&gt; </span>TTL blog:post:42:seen:u:3
+<span class="out">(integer) 1793</span>
+<span class="prompt">&gt; </span>INCR blog:post:42:views
+<span class="out">(integer) 1</span>
+<span class="prompt">&gt; </span>PFADD blog:post:42:uv u:1 u:2 u:3 u:1
+<span class="out">(integer) 1</span>                                  <span class="cmt"># 1 表示内部寄存器有变化</span>
+<span class="prompt">&gt; </span>PFCOUNT blog:post:42:uv
+<span class="out">(integer) 3</span>
+<span class="prompt">&gt; </span>MGET blog:post:42:views blog:post:7:views blog:post:999:views
+<span class="out">1) "1"
+2) "15"
+3) (nil)</span>                                      <span class="cmt"># 不存在的 key 返回 nil，代码里回落到 post.views</span>
+<span class="prompt">&gt; </span>MEMORY USAGE blog:post:42:uv
+<span class="out">(integer) 96</span>                                <span class="cmt"># 基数小时用稀疏编码，最大 12KB</span></code></pre>
+
+<h2 id="code"><span class="num">6</span>代码实现</h2>
+<h3 id="code-visitor">6.1 访客标识</h3>
+<pre data-file="Chapter03/mysite/blog/visitors.py"><code class="language-python" data-include="Chapter03/mysite/blog/visitors.py">def get_visitor_id(request):
+    """
+    返回当前访客的唯一标识，供浏览量、推荐、搜索历史等功能使用。
+
+    已登录用户：u:{用户ID}，换设备也是同一个人
+    匿名访客：  s:{session_key}，第一次访问时创建 Session
+    """
+    if request.user.is_authenticated:
+        return f'u:{request.user.pk}'
+    if not request.session.session_key:
+        request.session.save()
+    return f's:{request.session.session_key}'</code></pre>
+
+<h3 id="code-record">6.2 记录浏览</h3>
+<pre data-file="Chapter03/mysite/blog/services/pageviews.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/pageviews.py::record_view">def record_view(post, visitor_id):
+    """记录一次浏览。返回 True 表示计入了 PV，False 表示被防刷规则过滤。"""
+    r = get_redis()
+    # 1. 防刷：SET NX 只在 key 不存在时写入成功，EX 让标记 30 分钟后自动消失
+    first_visit = r.set(
+        K.post_seen(post.id, visitor_id), 1, nx=True, ex=DEDUP_SECONDS
+    )
+    if not first_visit:
+        return False
+
+    # 2. 剩下的命令打包成一个 pipeline，一次网络往返全部发出去
+    pipe = r.pipeline()
+    # Redis 里还没有计数（第一次访问，或 Redis 数据丢失）时，用数据库里的值打底
+    pipe.set(K.post_views(post.id), post.views, nx=True)
+    pipe.incr(K.post_views(post.id))
+    pipe.pfadd(K.post_uv(post.id), visitor_id)
+    # 记下这篇文章需要回写数据库
+    pipe.sadd(K.post_views_dirty(), post.id)
+    pipe.execute()
+    return True</code></pre>
+<div class="callout think">
+  <span class="label">为什么要先 SET NX 再 INCR？</span>
+  <p>假设数据库里已经存了 <code>views = 5000</code>，而 Redis 重启后数据丢了。如果直接 <code>INCR</code>，计数会从 1 开始。先执行 <code>SET key 5000 NX</code>：key 不存在时写入 5000，存在时什么也不做。这两条命令放在同一个 <code>MULTI/EXEC</code> 事务里，中间不会插入其他客户端的命令。</p>
+</div>
+
+<h3 id="code-read">6.3 批量读取</h3>
+<pre data-file="Chapter03/mysite/blog/services/pageviews.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/pageviews.py::attach_view_counts">def attach_view_counts(posts):
+    """给一组文章批量设置 view_count 属性：只用一次 MGET，而不是 N 次 GET。"""
+    posts = list(posts)
+    if not posts:
+        return posts
+    values = get_redis().mget([K.post_views(p.id) for p in posts])
+    for post, value in zip(posts, values):
+        post.view_count = int(value) if value is not None else post.views
+    return posts</code></pre>
+
+<h3 id="code-sync">6.4 回写数据库</h3>
+<pre data-file="Chapter03/mysite/blog/services/pageviews.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/pageviews.py::sync_views_to_db">def sync_views_to_db(batch_size=500):
+    """把 Redis 中的浏览量回写到 Post.views，返回更新的文章数。"""
+    r = get_redis()
+    updated = 0
+    while True:
+        # SPOP 随机弹出一批 ID：弹出即删除，多个进程同时执行也不会重复处理
+        ids = r.spop(K.post_views_dirty(), batch_size)
+        if not ids:
+            break
+        values = r.mget([K.post_views(post_id) for post_id in ids])
+        posts = [
+            Post(id=int(post_id), views=int(value))
+            for post_id, value in zip(ids, values)
+            if value is not None
+        ]
+        Post.objects.bulk_update(posts, ['views'])
+        updated += len(posts)
+    return updated</code></pre>
+<p>模型上新增了 <code>views</code> 字段（迁移 <code>0006_post_views</code>），保存的是 Redis 计数的持久化副本。</p>
+
+<h3 id="code-view">6.5 视图层改动</h3>
+<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-diff">  def post_detail(request, year, month, day, post):
+      post = get_object_or_404(...)
++     # Redis: count this view (deduplicated per visitor)
++     visitor_id = get_visitor_id(request)
++     pageviews.record_view(post, visitor_id)
+      ...
+      return render(request, 'blog/post/detail.html', {
+          ...
++         'views': pageviews.get_views(post),
++         'unique_visitors': pageviews.get_uv(post),
+      })
+
+  def post_list(request, tag_slug=None):
+      ...
++     # Redis: view counters for the whole page in one MGET
++     pageviews.attach_view_counts(posts)</code></pre>
+
+<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<ol class="steps">
+  <li>打开一篇文章，刷新几次，确认浏览数没有增加；换一个浏览器（或无痕窗口）打开，浏览数 +1，读者数 +1。</li>
+  <li>
+    <p>观察 Redis：</p>
+<pre class="cli"><code><span class="prompt">$ </span>docker compose exec redis redis-cli --scan --pattern 'blog:post:*'
+<span class="prompt">$ </span>docker compose exec redis redis-cli TTL blog:post:1:seen:s:&lt;你的 session key&gt;</code></pre>
+  </li>
+  <li>
+    <p>回写数据库，然后在 Admin 的文章列表里查看 views 列：</p>
+<pre class="cli"><code><span class="prompt">$ </span>python manage.py sync_post_views
+<span class="out">Synced views for 3 post(s).</span></code></pre>
+  </li>
+  <li>
+    <p>模拟 Redis 数据丢失：执行 <code>FLUSHDB</code> 后再访问文章，浏览量从数据库里的值继续 +1，不会从 1 开始。</p>
+  </li>
+</ol>
+
+<h2 id="think"><span class="num">8</span>边界与思考</h2>
+<div class="callout warn">
+  <span class="label">已知的取舍</span>
+  <ul>
+    <li><strong>SPOP 之后进程崩溃</strong>：这批 ID 已经从 dirty 集合删除，但还没写入数据库。计数仍然在 Redis 里，下次这些文章被访问时会重新加入 dirty 集合。如果需要严格保证，可以改用 <code>SMOVE</code> 移到一个 processing 集合，写库成功后再删除。</li>
+    <li><strong>爬虫会创建大量 Session</strong>：每个匿名访客都会在数据库里生成一条 Session 记录。生产环境可以先按 User-Agent 过滤爬虫，或者改用 IP + UA 的哈希作为访客 ID。</li>
+    <li><strong>UV 有约 0.81% 的误差</strong>：展示用没问题，计费、结算这类场景不能用。</li>
+  </ul>
+</div>
+<div class="callout think">
+  <span class="label">思考题</span>
+  <ol>
+    <li>想统计「全站今天的 UV」，需要每天建一个 HLL 吗？「本周 UV」能否由 7 个日 HLL 合并得到？（提示：<code>PFMERGE</code>）</li>
+    <li>pipeline 的 <code>transaction=True</code>（默认）和 <code>False</code> 有什么区别？这里用哪个更合适？</li>
+    <li>如果改成用 HASH（<code>HINCRBY blog:post:views 42 1</code>）实现，<code>sync_views_to_db</code> 应该怎么改？</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="02-redis-setup.html"><small>上一篇</small>← step-02 接入 Redis</a>
+  <a class="next" href="04-hot-ranking.html"><small>下一篇</small>step-04 热门排行榜 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

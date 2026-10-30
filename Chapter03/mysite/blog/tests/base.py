@@ -26,3 +26,27 @@ class RedisTestCase(TestCase):
         super().setUp()
         self.redis = get_redis()
         self.redis.flushdb()
+
+
+def make_user(username='alice'):
+    from django.contrib.auth import get_user_model
+
+    return get_user_model().objects.create_user(username, password='redis123')
+
+
+def make_post(title='Hello Redis', author=None, tags=(), **fields):
+    from django.utils.text import slugify
+
+    from blog.models import Post
+
+    post = Post.objects.create(
+        title=title,
+        slug=slugify(title),
+        author=author or make_user(f'author-{slugify(title)}'),
+        body='Demo body',
+        status=fields.pop('status', Post.Status.PUBLISHED),
+        **fields,
+    )
+    if tags:
+        post.tags.set(tags)
+    return post

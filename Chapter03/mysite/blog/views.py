@@ -9,6 +9,8 @@ from taggit.models import Tag
 
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
+from .services import pageviews
+from .visitors import get_visitor_id
 
 
 def post_list(request, tag_slug=None):
@@ -28,6 +30,8 @@ def post_list(request, tag_slug=None):
     except EmptyPage:
         # If page_number is out of range get last page of results
         posts = paginator.page(paginator.num_pages)
+    # Redis: view counters for the whole page in one MGET
+    pageviews.attach_view_counts(posts)
     return render(
         request,
         'blog/post/list.html',
@@ -47,6 +51,10 @@ def post_detail(request, year, month, day, post):
         publish__month=month,
         publish__day=day,
     )
+
+    # Redis: count this view (deduplicated per visitor)
+    visitor_id = get_visitor_id(request)
+    pageviews.record_view(post, visitor_id)
 
     # List of active comments for this post
     comments = post.comments.filter(active=True)
@@ -70,6 +78,8 @@ def post_detail(request, year, month, day, post):
             'comments': comments,
             'form': form,
             'similar_posts': similar_posts,
+            'views': pageviews.get_views(post),
+            'unique_visitors': pageviews.get_uv(post),
         },
     )
 

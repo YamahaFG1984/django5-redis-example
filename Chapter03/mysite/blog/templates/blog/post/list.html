@@ -24,6 +24,7 @@
     </p>
     <p class="date">
       Published {{ post.publish }} by {{ post.author }}
+      &middot; {{ post.view_count }} view{{ post.view_count|pluralize }}
     </p>
     {{ post.body|markdown|truncatewords_html:30 }}
   {% endfor %}

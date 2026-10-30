@@ -10,3 +10,24 @@ from django.conf import settings
 
 def _k(*parts):
     return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])
+
+
+# ---------------------------------------------------------------- step-03 浏览量
+def post_views(post_id):
+    """STRING  文章 PV 计数"""
+    return _k('post', post_id, 'views')
+
+
+def post_uv(post_id):
+    """HYPERLOGLOG  文章 UV（独立访客数）"""
+    return _k('post', post_id, 'uv')
+
+
+def post_seen(post_id, visitor_id):
+    """STRING  防刷标记：某访客最近看过某文章，TTL 30 分钟"""
+    return _k('post', post_id, 'seen', visitor_id)
+
+
+def post_views_dirty():
+    """SET  浏览量有变化、等待回写数据库的文章 ID"""
+    return _k('post', 'views', 'dirty')
