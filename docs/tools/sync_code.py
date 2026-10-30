@@ -5,8 +5,9 @@
     python3 docs/tools/sync_code.py
 
 在 HTML 中这样声明要嵌入的代码：
-    <code class="language-python"
-          data-include="Chapter03/mysite/blog/services/pageviews.py::record_view"></code>
+    <div class="code" data-lang="python" data-file="...">
+      <pre data-include="Chapter03/mysite/blog/services/pageviews.py::record_view"></pre>
+    </div>
 
 data-include 支持四种写法：
     path                      -> 整个文件
@@ -23,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = ROOT / 'docs'
 PATTERN = re.compile(
-    r'(<code\b[^>]*\bdata-include="([^"]+)"[^>]*>)(.*?)(</code>)', re.S
+    r'(<pre\b[^>]*\bdata-include="([^"]+)"[^>]*>)(.*?)(</pre>)', re.S
 )
 
 

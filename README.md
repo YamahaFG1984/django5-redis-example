@@ -3,7 +3,7 @@
 基于《Django 5 By Example》第 3 章的博客项目（`Chapter03/`），逐步加入 10 个基于 Redis 的功能，
 覆盖 STRING、HASH、LIST、SET、ZSET、Bitmap、HyperLogLog、Stream 和 Lua 脚本。
 
-**文档入口：用浏览器打开 [`docs/index.html`](docs/index.html)**（图表由 Mermaid 渲染，需要联网加载 CDN）。
+**文档入口：用浏览器打开 [`docs/index.html`](docs/index.html)**（纯静态页面，不依赖任何外部资源，双击即可离线阅读；设计与配色沿用 Hono 教程的文档风格）。
 
 | Tag | 内容 | 文档 |
 | --- | --- | --- |

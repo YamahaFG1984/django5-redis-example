@@ -2,72 +2,80 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>热搜、搜索历史与联想</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>热搜、搜索历史与联想 — Django × Redis 实战</title>
 <link rel="stylesheet" href="../assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="../assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="../index.html">首页</a>
-    <a href="../01-prd.html">PRD</a>
-    <a href="../02-design.html">设计文档</a>
-    <a href="../index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="11">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">Step 11 · 列表与字典序</div>
-  <h1>搜索增强：热搜榜、搜索历史、前缀联想</h1>
-  <p class="lead">给原书的搜索页加上三个常见功能：热搜榜（ZSET 计数）、个人最近搜索（LIST 加去重和截断），以及输入时的标题联想（利用 ZSET 在分数相同时按字典序排列的特性做前缀查询）。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">Step 11 · 列表与字典序</span>
+<h1>搜索增强：热搜榜、搜索历史、前缀联想</h1>
+<p class="lede">给原书的搜索页加上三个常见功能：热搜榜（ZSET 计数）、个人最近搜索（LIST 加去重和截断），以及输入时的标题联想（利用 ZSET 在分数相同时按字典序排列的特性做前缀查询）。</p>
+<div class="meta">
     <span class="pill tag">git checkout step-11-search</span>
-    <span class="t zset">ZSET</span><span class="t list">LIST</span>
-  </div>
-</section>
+    <span class="rt zset">ZSET</span><span class="rt list">LIST</span>
+</div>
 
-<h2 id="scene"><span class="num">1</span>场景分析</h2>
-<div class="table-wrap"><table>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 ZSET 统计热搜词</li>
+    <li>用 LIST 的 <code>LREM</code> + <code>LPUSH</code> + <code>LTRIM</code> 维护最近搜索</li>
+    <li>用 <code>ZRANGEBYLEX</code> 实现前缀联想</li>
+    <li>避开 UTF-8 字节序的坑</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">场景分析</h2>
+<div class="tw"><table>
   <thead><tr><th>功能（PRD F9）</th><th>数据特点</th><th>结构</th><th>核心命令</th></tr></thead>
   <tbody>
-    <tr><td>热搜榜前 10</td><td>按次数排序</td><td><span class="t zset">ZSET</span></td><td><code>ZINCRBY</code> <code>ZREVRANGE</code></td></tr>
-    <tr><td>我最近的 10 次搜索</td><td>按时间排序、去重、只保留最新 N 条</td><td><span class="t list">LIST</span></td><td><code>LREM</code> <code>LPUSH</code> <code>LTRIM</code></td></tr>
-    <tr><td>输入前缀，联想标题</td><td>按字符串前缀查找</td><td><span class="t zset">ZSET</span>（score 全为 0）</td><td><code>ZRANGEBYLEX</code></td></tr>
+    <tr><td>热搜榜前 10</td><td>按次数排序</td><td><span class="rt zset">ZSET</span></td><td><code>ZINCRBY</code> <code>ZREVRANGE</code></td></tr>
+    <tr><td>我最近的 10 次搜索</td><td>按时间排序、去重、只保留最新 N 条</td><td><span class="rt list">LIST</span></td><td><code>LREM</code> <code>LPUSH</code> <code>LTRIM</code></td></tr>
+    <tr><td>输入前缀，联想标题</td><td>按字符串前缀查找</td><td><span class="rt zset">ZSET</span>（score 全为 0）</td><td><code>ZRANGEBYLEX</code></td></tr>
   </tbody>
 </table></div>
 <p>这三个功能都不适合放在数据库里：热搜和历史是高频的小量写入；前缀查询虽然可以用 <code>LIKE 'redis%'</code> 加索引，但联想请求是每输入一个字符就发一次，量很大。</p>
 
-<h2 id="history"><span class="num">2</span>搜索历史：LIST 的「去重 + 置顶 + 截断」</h2>
+<h2 id="history">搜索历史：LIST 的「去重 + 置顶 + 截断」</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  S0["当前：[django, redis, cache]"] -->|"搜索 redis"| A["LREM key 0 redis<br/>[django, cache]"]
-  A --> B["LPUSH key redis<br/>[redis, django, cache]"]
-  B --> C["LTRIM key 0 9<br/>只保留前 10 个"]
-  C --> D["EXPIRE key 30 天"]
-  </pre></div>
-  <figcaption>图 1　四条命令放在一个 MULTI 里执行：重复搜索的词会移到最前面，列表长度不会超过 10</figcaption>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="搜索历史：去重、置顶、截断">
+  <rect class="bx" x="10" y="40" width="170" height="64" rx="8"/>
+  <text class="lbl" x="95" y="68" text-anchor="middle">当前</text>
+  <text class="sm mono" x="95" y="85" text-anchor="middle">[django, redis, cache]</text>
+  <rect class="bx" x="198" y="40" width="170" height="64" rx="8"/>
+  <text class="sm mono" x="283" y="68" text-anchor="middle">LREM key 0 redis</text>
+  <text class="sm mono" x="283" y="85" text-anchor="middle">[django, cache]</text>
+  <path class="ln-b" d="M180 72 L196 72" marker-end="url(#ar-b)"/>
+  <rect class="bx-b" x="386" y="40" width="170" height="64" rx="8"/>
+  <text class="sm mono" x="471" y="68" text-anchor="middle">LPUSH key redis</text>
+  <text class="sm mono" x="471" y="85" text-anchor="middle">[redis, django, cache]</text>
+  <path class="ln-b" d="M368 72 L384 72" marker-end="url(#ar-b)"/>
+  <rect class="bx-b" x="574" y="40" width="170" height="64" rx="8"/>
+  <text class="sm mono" x="659" y="68" text-anchor="middle">LTRIM key 0 9</text>
+  <text class="sm" x="659" y="85" text-anchor="middle">只保留前 10 个</text>
+  <path class="ln-b" d="M556 72 L572 72" marker-end="url(#ar-b)"/>
+  <text class="lbl" x="10" y="24">搜索 &quot;redis&quot; 时：</text>
+  <rect class="bx" x="574" y="130" width="170" height="40" rx="8"/>
+  <text class="sm mono" x="659" y="154.5" text-anchor="middle">EXPIRE key 30 天</text>
+  <path class="ln" d="M659 104 L659 128" marker-end="url(#ar)"/>
+  <text class="sm" x="10" y="160">4 条命令放在一个 MULTI 里执行</text>
+</svg>
+<figcaption>图 11-1　四条命令放在一个 MULTI 里执行：重复搜索的词会移到最前面，列表长度不会超过 10</figcaption>
 </figure>
 <div class="keys">
   <div class="rk">
-    <div class="rk-head"><span class="t list">LIST</span><code>blog:search:history:s:abc</code><span class="ttl">30d</span></div>
+    <div class="rk-head"><span class="rt list">LIST</span><code>blog:search:history:s:abc</code><span class="ttl">30d</span></div>
     <div class="rk-body"><div class="list-cells"><span>redis</span><span>django</span><span>cache</span></div></div>
     <div class="rk-note">左边是最新的。LRANGE 0 -1 读出全部。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:search:hot</code><span class="ttl">∞</span></div>
+    <div class="rk-head"><span class="rt zset">ZSET</span><code>blog:search:hot</code><span class="ttl">∞</span></div>
     <div class="rk-body">
       <div class="row"><span>redis</span><span class="score">42</span></div>
       <div class="row"><span>django</span><span class="score">17</span></div>
@@ -76,59 +84,81 @@ flowchart LR
     <div class="rk-note">关键词先规范化：小写、合并空白。</div>
   </div>
 </div>
-<div class="callout tip">
-  <span class="label">LREM 的复杂度</span>
+<div class="box tip">
+  <div class="t">&#10003; LREM 的复杂度</div>
   <p><code>LREM</code> 是 O(N)，要遍历整个列表。因为有 LTRIM，列表长度始终不超过 10，所以没有问题。如果列表很长又需要去重，应该换成 ZSET（member = 关键词，score = 时间戳）。</p>
 </div>
 
-<h2 id="suggest"><span class="num">3</span>标题联想：ZRANGEBYLEX</h2>
-<h3 id="lex">3.1 原理</h3>
+<h2 id="suggest">标题联想：ZRANGEBYLEX</h2>
+<h3 id="lex">原理</h3>
 <p>当 ZSET 中所有元素的 score 相同时，元素按 member 的<strong>字节序</strong>排列。这时就可以用 <code>ZRANGEBYLEX key [min [max</code> 按字符串范围查询。「以 redis str 开头」等价于「≥ <code>redis str</code> 且 ≤ <code>redis str</code> + 一个最大的字符」：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart TB
-  subgraph Z["blog:search:suggest（score 全为 0，按字节序排列）"]
-    direction TB
-    m1["async views in django 5|10"]
-    m2["building a rest api with django|7"]
-    m3["django orm tips and tricks|3"]
-    m4["redis cluster notes|13"]
-    m5["redis streams as a message queue|9"]
-    m6["redis strings and atomic counters|2"]
-    m7["sorted sets for leaderboards|5"]
-    m1 --- m2 --- m3 --- m4 --- m5 --- m6 --- m7
-  end
-  Q["ZRANGEBYLEX suggest<br/>[redis str<br/>[redis str + U+10FFFF<br/>LIMIT 0 8"] -.命中区间.-> m5
-  Q -.-> m6
-  </pre></div>
-  <figcaption>图 2　前缀查询变成了有序列表上的一次区间查找，复杂度 O(log N + M)</figcaption>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="ZRANGEBYLEX 前缀查询">
+  <text class="lbl" x="10" y="18">blog:search:suggest（score 全为 0，按字节序排列）</text>
+  <rect class="bx" x="10" y="30" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="48.5" text-anchor="middle">async views in django 5|10</text>
+  <rect class="bx" x="10" y="64" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="82.5" text-anchor="middle">building a rest api with django|7</text>
+  <rect class="bx" x="10" y="98" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="116.5" text-anchor="middle">django orm tips and tricks|3</text>
+  <rect class="bx" x="10" y="132" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="150.5" text-anchor="middle">redis cluster notes|13</text>
+  <rect class="bx-g" x="10" y="166" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="184.5" text-anchor="middle">redis streams as a message queue|9</text>
+  <rect class="bx-g" x="10" y="200" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="218.5" text-anchor="middle">redis strings and atomic counters|2</text>
+  <rect class="bx" x="10" y="234" width="340" height="28" rx="8"/>
+  <text class="sm mono" x="180" y="252.5" text-anchor="middle">sorted sets for leaderboards|5</text>
+  <path class="ln-g" d="M360 168 H380 V230 H360"/>
+  <rect class="bx-y" x="400" y="150" width="350" height="100" rx="8"/>
+  <text class="lbl mono" x="575" y="179" text-anchor="middle">ZRANGEBYLEX suggest</text>
+  <text class="sm mono" x="575" y="196" text-anchor="middle">[redis str</text>
+  <text class="sm mono" x="575" y="213" text-anchor="middle">[redis str + U+10FFFF</text>
+  <text class="sm mono" x="575" y="230" text-anchor="middle">LIMIT 0 8</text>
+  <path class="ln-g" d="M398 200 L382 200" marker-end="url(#ar-g)"/>
+  <text class="sm" x="400" y="60">前缀查询变成有序列表上的一次区间查找</text>
+  <text class="sm" x="400" y="80">复杂度 O(log N + M)</text>
+  <text class="sm mono" x="400" y="110">member = 小写标题|文章ID</text>
+</svg>
+<figcaption>图 11-2　前缀查询变成了有序列表上的一次区间查找，复杂度 O(log N + M)</figcaption>
 </figure>
 <p>member 的格式是 <code>小写标题|文章ID</code>：前半部分用于排序和匹配，后半部分用于取回文章。</p>
 
-<h3 id="maxchar">3.2 上界为什么用 U+10FFFF</h3>
+<h3 id="maxchar">上界为什么用 U+10FFFF</h3>
 <p>常见的写法是用 <code>\xff</code> 作为上界。在 Python 中，<code>'\xff'</code> 是字符 ÿ，用 UTF-8 编码后是 <code>C3 BF</code> 两个字节。而中文字符的 UTF-8 编码以 <code>E4</code>~<code>E9</code> 开头，比 <code>C3</code> 大，所以 <code>redis 入门</code> 会排在上界 <code>redis ÿ</code> 之后，查不到。U+10FFFF 是 Unicode 的最大码点，编码为 <code>F4 8F BF BF</code>，比任何合法的 UTF-8 字符都大。测试 <code>test_non_ascii_titles</code> 覆盖了这个情况。</p>
-<div class="callout info">
-  <span class="label">另一种做法</span>
+<div class="box note">
+  <div class="t">&#9432; 另一种做法</div>
   <p>如果 redis-py 不设置 <code>decode_responses</code>，可以直接用字节 <code>b'\xff'</code> 作为上界（0xFF 不会出现在合法的 UTF-8 中）。本项目统一用 str，所以选了 U+10FFFF。</p>
 </div>
 
-<h3 id="index">3.3 维护索引</h3>
+<h3 id="index">维护索引</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant A as Admin 修改标题
-  participant S as signals
-  participant R as Redis
-  A->>S: pre_save：取出修改前的文章 _old（第 5 章已经加了）
-  A->>S: post_save
-  S->>R: MULTI
-  S->>R: ZREM suggest "django orm tips|3"（旧标题）
-  S->>R: ZADD suggest 0 "async django|3"（新标题，仅已发布）
-  S->>R: EXEC
-  </pre></div>
-  <figcaption>图 3　标题改了，member 也就变了，所以要先删除旧的 member。这里复用了第 5 章 pre_save 中保存的 <code>_old</code></figcaption>
+<svg class="dgm" viewBox="0 0 760 288" role="img" aria-label="标题联想索引的维护">
+  <path class="life" d="M100.558 54 L100.558 282"/>
+  <path class="life" d="M327.679 54 L327.679 282"/>
+  <path class="life" d="M676 54 L676 282"/>
+  <rect class="bx" x="36" y="14" width="129.115" height="40" rx="8"/>
+  <text class="ttl" x="100.558" y="39" text-anchor="middle">Admin 修改标题</text>
+  <rect class="bx-a" x="279.679" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-a" x="327.679" y="39" text-anchor="middle">signals</text>
+  <rect class="bx-r" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="676" y="39" text-anchor="middle">Redis</text>
+  <text class="lbl" x="214.118" y="76" text-anchor="middle">pre_save：取出修改前的文章 _old</text>
+  <path class="ln" d="M105.558 82 L321.679 82" marker-end="url(#ar)"/>
+  <text class="lbl" x="214.118" y="110" text-anchor="middle">post_save</text>
+  <path class="ln" d="M105.558 116 L321.679 116" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="501.839" y="144" text-anchor="middle">MULTI</text>
+  <path class="ln-r" d="M332.679 150 L670 150" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="501.839" y="178" text-anchor="middle">ZREM suggest &quot;django orm tips|3&quot;（旧标题）</text>
+  <path class="ln-r" d="M332.679 184 L670 184" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="501.839" y="212" text-anchor="middle">ZADD suggest 0 &quot;async django|3&quot;（新标题）</text>
+  <path class="ln-r" d="M332.679 218 L670 218" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="501.839" y="246" text-anchor="middle">EXEC</text>
+  <path class="ln-r" d="M332.679 252 L670 252" marker-end="url(#ar-r)"/>
+</svg>
+<figcaption>图 11-3　标题改了，member 也就变了，所以要先删除旧的 member。这里复用了第 5 章 pre_save 中保存的 <code>_old</code></figcaption>
 </figure>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-11"># ---------------------------------------------------------------- step-11 搜索
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><pre data-include="Chapter03/mysite/blog/redis_keys.py::#step-11"># ---------------------------------------------------------------- step-11 搜索
 def search_hot():
     """ZSET  热搜词：member = 规范化后的关键词，score = 搜索次数"""
     return _k('search', 'hot')
@@ -141,48 +171,66 @@ def search_history(visitor_id):
 
 def search_suggest():
     """ZSET  标题联想索引：score 全为 0，member = "小写标题|文章 ID"，按字典序排列"""
-    return _k('search', 'suggest')</code></pre>
+    return _k('search', 'suggest')</pre></div>
 
-<h2 id="flow"><span class="num">4</span>完整交互</h2>
+<h2 id="flow">完整交互</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant B as 浏览器
-  participant V as Django
-  participant R as Redis
-  B->>V: 输入 "re" → GET /blog/search/suggest/?q=re
-  V->>R: ZRANGEBYLEX suggest [re [re + U+10FFFF LIMIT 0 8
-  V-->>B: [{"title": "Redis Cluster Notes", ...}, ...]
-  B->>V: 提交 GET /blog/search/?query=Redis
-  V->>R: MULTI · ZINCRBY hot 1 redis · LREM/LPUSH/LTRIM/EXPIRE history · EXEC
-  V->>V: PostgreSQL 三元组相似度搜索（原书逻辑不变）
-  V->>R: ZREVRANGE hot 0 9 WITHSCORES · LRANGE history 0 -1
-  V-->>B: 结果 + 最近搜索 + 热搜榜
-  </pre></div>
-  <figcaption>图 4　Redis 只负责联想、热搜和历史，真正的全文搜索仍然由 PostgreSQL 完成</figcaption>
+<svg class="dgm" viewBox="0 0 760 444" role="img" aria-label="搜索页的完整交互">
+  <path class="life" d="M84 54 L84 438"/>
+  <path class="life" d="M352.28 54 L352.28 438"/>
+  <path class="life" d="M676 54 L676 438"/>
+  <rect class="bx-b" x="36" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-b" x="84" y="39" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="304.28" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="352.28" y="39" text-anchor="middle">Django</text>
+  <rect class="bx-r" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="676" y="39" text-anchor="middle">Redis</text>
+  <text class="lbl mono" x="218.14" y="76" text-anchor="middle">输入 &quot;re&quot;</text>
+  <text class="lbl mono" x="218.14" y="92" text-anchor="middle">GET /blog/search/suggest/?q=re</text>
+  <path class="ln" d="M89 98 L346.28 98" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="514.14" y="126" text-anchor="middle">ZRANGEBYLEX suggest</text>
+  <text class="lbl mono" x="514.14" y="142" text-anchor="middle">[re [re+U+10FFFF LIMIT 0 8</text>
+  <path class="ln-r" d="M357.28 148 L670 148" marker-end="url(#ar-r)"/>
+  <text class="lbl" x="218.14" y="176" text-anchor="middle">[{&quot;title&quot;: &quot;Redis …&quot;, …}]</text>
+  <path class="ln-d" d="M347.28 182 L90 182" marker-end="url(#ar)"/>
+  <text class="lbl" x="218.14" y="210" text-anchor="middle">提交 GET /blog/search/?query=Redis</text>
+  <path class="ln" d="M89 216 L346.28 216" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="514.14" y="244" text-anchor="middle">MULTI · ZINCRBY hot 1 redis</text>
+  <text class="lbl mono" x="514.14" y="260" text-anchor="middle">LREM / LPUSH / LTRIM / EXPIRE history</text>
+  <text class="lbl mono" x="514.14" y="276" text-anchor="middle">EXEC</text>
+  <path class="ln-r" d="M357.28 282 L670 282" marker-end="url(#ar-r)"/>
+  <path class="ln" d="M357.28 308 h22 v22 h-16" marker-end="url(#ar)"/>
+  <text class="lbl" x="386.28" y="318">PostgreSQL 三元组相似度搜索</text>
+  <text class="lbl mono" x="514.14" y="352" text-anchor="middle">ZREVRANGE hot 0 9 WITHSCORES</text>
+  <text class="lbl mono" x="514.14" y="368" text-anchor="middle">LRANGE history 0 -1</text>
+  <path class="ln-r" d="M357.28 374 L670 374" marker-end="url(#ar-r)"/>
+  <text class="lbl" x="218.14" y="402" text-anchor="middle">结果 + 最近搜索 + 热搜榜</text>
+  <path class="ln-d" d="M347.28 408 L90 408" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 11-4　Redis 只负责联想、热搜和历史，真正的全文搜索仍然由 PostgreSQL 完成</figcaption>
 </figure>
 
-<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
-<pre class="cli"><code><span class="prompt">&gt; </span>RPUSH demo:h django cache
-<span class="prompt">&gt; </span>LREM demo:h 0 redis
-<span class="out">(integer) 0</span>
-<span class="prompt">&gt; </span>LPUSH demo:h redis
-<span class="prompt">&gt; </span>LTRIM demo:h 0 1
-<span class="prompt">&gt; </span>LRANGE demo:h 0 -1
-<span class="out">1) "redis" 2) "django"</span>
-<span class="prompt">&gt; </span>ZADD demo:s 0 "redis streams|9" 0 "redis strings|2" 0 "redis cluster|13" 0 "django orm|3"
-<span class="prompt">&gt; </span>ZRANGEBYLEX demo:s "[redis str" "[redis str\xff"
-<span class="out">1) "redis streams|9"
-2) "redis strings|2"</span>
-<span class="prompt">&gt; </span>ZRANGEBYLEX demo:s - + LIMIT 0 2        <span class="cmt"># - 和 + 表示最小值和最大值</span>
-<span class="out">1) "django orm|3"
-2) "redis cluster|13"</span>
-<span class="prompt">&gt; </span>ZLEXCOUNT demo:s "[redis" "(redit"      <span class="cmt"># 以 redis 开头的有几个（另一种写上界的方法）</span>
-<span class="out">(integer) 3</span></code></pre>
+<h2 id="cli">用 redis-cli 体验</h2>
+<div class="code" data-lang="cli"><pre>&gt; RPUSH demo:h django cache
+&gt; LREM demo:h 0 redis
+(integer) 0
+&gt; LPUSH demo:h redis
+&gt; LTRIM demo:h 0 1
+&gt; LRANGE demo:h 0 -1
+1) "redis" 2) "django"
+&gt; ZADD demo:s 0 "redis streams|9" 0 "redis strings|2" 0 "redis cluster|13" 0 "django orm|3"
+&gt; ZRANGEBYLEX demo:s "[redis str" "[redis str\xff"
+1) "redis streams|9"
+2) "redis strings|2"
+&gt; ZRANGEBYLEX demo:s - + LIMIT 0 2        # - 和 + 表示最小值和最大值
+1) "django orm|3"
+2) "redis cluster|13"
+&gt; ZLEXCOUNT demo:s "[redis" "(redit"      # 以 redis 开头的有几个（另一种写上界的方法）
+(integer) 3</pre></div>
 <p>注：redis-cli 中双引号里的 <code>\xff</code> 会被解析成字节 0xFF，所以这里能正常工作。</p>
 
-<h2 id="code"><span class="num">6</span>代码实现</h2>
-<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::record_search">def record_search(visitor_id, query):
+<h2 id="code">代码实现</h2>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/search.py"><pre data-include="Chapter03/mysite/blog/services/search.py::record_search">def record_search(visitor_id, query):
     q = normalize(query)
     if not q:
         return
@@ -193,8 +241,8 @@ sequenceDiagram
     pipe.lpush(history, q)                # 插到最前面
     pipe.ltrim(history, 0, HISTORY_SIZE - 1)  # 只保留最近 10 条
     pipe.expire(history, HISTORY_TTL)
-    pipe.execute()</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::index_title">def index_title(post, old=None):
+    pipe.execute()</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/search.py"><pre data-include="Chapter03/mysite/blog/services/search.py::index_title">def index_title(post, old=None):
     """文章保存时维护联想索引。old 是修改前的文章（标题可能变了）。"""
     pipe = get_redis().pipeline()
     if old is not None:
@@ -203,8 +251,8 @@ sequenceDiagram
         pipe.zadd(K.search_suggest(), {_member(post): 0})
     else:
         pipe.zrem(K.search_suggest(), _member(post))
-    pipe.execute()</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::suggest">def suggest(prefix, limit=SUGGEST_LIMIT):
+    pipe.execute()</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/search.py"><pre data-include="Chapter03/mysite/blog/services/search.py::suggest">def suggest(prefix, limit=SUGGEST_LIMIT):
     """返回标题以 prefix 开头的已发布文章。"""
     p = normalize(prefix)
     if not p:
@@ -215,39 +263,39 @@ sequenceDiagram
     )
     ids = [int(m.rsplit(SEP, 1)[1]) for m in members]
     posts = Post.published.in_bulk(ids)
-    return [posts[i] for i in ids if i in posts]</code></pre>
-<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-python" data-include="Chapter03/mysite/blog/views.py::search_suggest">def search_suggest(request):
+    return [posts[i] for i in ids if i in posts]</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/views.py"><pre data-include="Chapter03/mysite/blog/views.py::search_suggest">def search_suggest(request):
     posts = search.suggest(request.GET.get('q', ''))
     return JsonResponse(
         [{'title': p.title, 'url': p.get_absolute_url()} for p in posts],
         safe=False,
-    )</code></pre>
+    )</pre></div>
 
-<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<h2 id="lab">动手实验</h2>
 <ol class="steps">
   <li>执行 <code>python manage.py rebuild_redis_index</code>，为已有文章建立联想索引。</li>
   <li>打开 <code>/blog/search/</code>，在输入框中输入 <code>re</code>、<code>redis s</code>、<code>dj</code>，观察下方的联想结果。</li>
   <li>分别搜索 <code>Redis</code>、<code>redis</code>、<code>Django</code>，回到搜索页，查看「最近搜索」和「热搜」。</li>
   <li>
     <p>在 redis-cli 中：</p>
-<pre class="cli"><code><span class="prompt">&gt; </span>ZRANGE blog:search:suggest 0 -1
-<span class="prompt">&gt; </span>ZREVRANGE blog:search:hot 0 9 WITHSCORES
-<span class="prompt">&gt; </span>LRANGE blog:search:history:s:&lt;sessionid&gt; 0 -1</code></pre>
+<div class="code" data-lang="cli"><pre>&gt; ZRANGE blog:search:suggest 0 -1
+&gt; ZREVRANGE blog:search:hot 0 9 WITHSCORES
+&gt; LRANGE blog:search:history:s:&lt;sessionid&gt; 0 -1</pre></div>
   </li>
   <li>在 Admin 中修改一篇文章的标题，再测试联想，旧标题已经搜不到了。</li>
 </ol>
 
-<h2 id="think"><span class="num">8</span>边界与思考</h2>
-<div class="callout warn">
-  <span class="label">本实现的取舍</span>
+<h2 id="think">边界与思考</h2>
+<div class="box warn">
+  <div class="t">&#9888; 本实现的取舍</div>
   <ul>
     <li><strong>只能匹配开头</strong>：输入 <code>orm</code> 找不到 <code>Django ORM Tips</code>。可以把标题的每个单词开头都作为一个 member 加进去（<code>orm tips|3</code>、<code>tips|3</code>），代价是索引变大。</li>
     <li><strong>热搜没有过滤</strong>：任何人都能刷热搜词。实际应用中要配合限流（第 10 章）和敏感词过滤，也可以只统计有搜索结果的词。</li>
     <li><strong>热搜没有时间维度</strong>：可以参照第 4 章，按天拆 Key，再用 ZUNIONSTORE 合并出「近 7 天热搜」。</li>
   </ul>
 </div>
-<div class="callout think">
-  <span class="label">思考题</span>
+<div class="exercise">
+  <h3>思考题</h3>
   <ol>
     <li>想让联想结果按热度排序而不是按字母顺序，ZRANGEBYLEX 还能用吗？（提示：先按前缀取出候选，再按文章的热度重新排序）</li>
     <li>如果要支持拼音联想（输入 <code>rm</code> 联想到「入门」），索引应该怎么设计？</li>
@@ -255,12 +303,10 @@ sequenceDiagram
   </ol>
 </div>
 
-<div class="pager">
-  <a href="10-rate-limit.html"><small>上一篇</small>← step-10 接口限流</a>
-  <a class="next" href="12-notifications.html"><small>下一篇</small>step-12 评论通知 →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="../assets/site.js"></script>
 </body>
 </html>

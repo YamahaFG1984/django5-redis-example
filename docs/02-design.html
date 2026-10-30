@@ -2,73 +2,91 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>博客 Redis 系统设计</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>博客 Redis 系统设计 — Django × Redis 实战</title>
 <link rel="stylesheet" href="assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="index.html">首页</a>
-    <a href="01-prd.html">PRD</a>
-    <a href="02-design.html">设计文档</a>
-    <a href="index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="design">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">02 · System Design</div>
-  <h1>系统设计文档</h1>
-  <p class="lead">PRD 回答了「做什么」，这份文档回答「怎么做」：Redis 放在架构的什么位置，代码怎么分层，Key 怎么命名，数据以谁为准。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">02 · System Design</span>
+<h1>系统设计文档</h1>
+<p class="lede">PRD 回答了「做什么」，这份文档回答「怎么做」：Redis 放在架构的什么位置，代码怎么分层，Key 怎么命名，数据以谁为准。</p>
+<div class="meta">
     <span class="pill">版本 v1.0</span>
     <span class="pill tag">step-01-docs</span>
-  </div>
-</section>
+</div>
 
-<h2 id="arch"><span class="num">1</span>总体架构</h2>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>看懂 Redis 在架构中的两个角色：业务数据（db0）和缓存（db1）</li>
+    <li>掌握 views → services → redis_keys 的三层结构</li>
+    <li>学会按需求选择数据结构，判断数据以 Redis 还是数据库为准</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="arch">总体架构</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  B["🌐 浏览器"] --> V
-
-  subgraph Django["Django 进程 (web_run)"]
-    direction TB
-    V["views.py<br/>处理 HTTP"] --> S["services/*<br/>业务逻辑 + Redis 操作"]
-    V --> ORM["models.py<br/>ORM"]
-    SIG["signals.py<br/>模型变更钩子"] --> S
-    ORM -.post_save / m2m_changed.-> SIG
-    TT["templatetags<br/>侧边栏"] --> S
-    S --> RC["redis_client.py<br/>连接池"]
-    S --> DC["django cache<br/>RedisCache"]
-  end
-
-  subgraph Worker["后台进程 (web_worker)"]
-    W["notify_worker<br/>Stream 消费者"]
-  end
-  CRON["⏰ cron<br/>sync_post_views"]
-
-  RC --> R0[("Redis db0<br/>业务数据")]
-  DC --> R1[("Redis db1<br/>缓存")]
-  ORM --> PG[("PostgreSQL<br/>持久数据")]
-  W --> R0
-  W --> PG
-  CRON --> R0
-  CRON --> PG
-  </pre></div>
-  <figcaption>图 1　整体架构：Redis 承担业务数据（db0）和缓存（db1）两种角色</figcaption>
+<svg class="dgm" viewBox="0 0 760 430" role="img" aria-label="整体架构">
+  <rect class="bx" x="10" y="150" width="86" height="50" rx="8"/>
+  <text class="ttl" x="53" y="179" text-anchor="middle">浏览器</text>
+  <rect class="bx-d" x="118" y="14" width="400" height="300" rx="10"/>
+  <text class="ttl" x="132" y="36">Django 进程（web_run）</text>
+  <rect class="bx" x="136" y="52" width="150" height="40" rx="8"/>
+  <text class="lbl mono" x="211" y="76.5" text-anchor="middle">views.py</text>
+  <rect class="bx" x="136" y="108" width="150" height="40" rx="8"/>
+  <text class="lbl mono" x="211" y="132.5" text-anchor="middle">templatetags</text>
+  <rect class="bx" x="136" y="164" width="150" height="40" rx="8"/>
+  <text class="lbl mono" x="211" y="188.5" text-anchor="middle">signals.py</text>
+  <rect class="bx-b" x="136" y="250" width="150" height="44" rx="8"/>
+  <text class="ttl on-b" x="211" y="267.5" text-anchor="middle">ORM</text>
+  <text class="sm mono" x="211" y="285.5" text-anchor="middle">models.py</text>
+  <rect class="bx-a" x="340" y="70" width="160" height="60" rx="8"/>
+  <text class="ttl on-a" x="420" y="95.5" text-anchor="middle">services/*</text>
+  <text class="sm" x="420" y="113.5" text-anchor="middle">业务逻辑 + Redis 操作</text>
+  <rect class="bx" x="340" y="170" width="160" height="40" rx="8"/>
+  <text class="lbl mono" x="420" y="194.5" text-anchor="middle">redis_client.py</text>
+  <rect class="bx" x="340" y="250" width="160" height="44" rx="8"/>
+  <text class="ttl" x="420" y="267.5" text-anchor="middle">django cache</text>
+  <text class="sm mono" x="420" y="285.5" text-anchor="middle">RedisCache</text>
+  <rect class="bx-r" x="590" y="40" width="140" height="56" rx="8"/>
+  <text class="ttl on-r" x="660" y="63.5" text-anchor="middle">Redis db0</text>
+  <text class="sm" x="660" y="81.5" text-anchor="middle">业务数据</text>
+  <rect class="bx-r" x="590" y="150" width="140" height="56" rx="8"/>
+  <text class="ttl on-r" x="660" y="173.5" text-anchor="middle">Redis db1</text>
+  <text class="sm" x="660" y="191.5" text-anchor="middle">缓存</text>
+  <rect class="bx-b" x="590" y="350" width="140" height="56" rx="8"/>
+  <text class="ttl on-b" x="660" y="373.5" text-anchor="middle">PostgreSQL</text>
+  <text class="sm" x="660" y="391.5" text-anchor="middle">持久数据</text>
+  <rect class="bx-y" x="130" y="358" width="170" height="48" rx="8"/>
+  <text class="ttl on-y" x="215" y="377.5" text-anchor="middle">web_worker</text>
+  <text class="sm mono" x="215" y="395.5" text-anchor="middle">notify_worker</text>
+  <rect class="bx" x="330" y="358" width="190" height="48" rx="8"/>
+  <text class="ttl" x="425" y="377.5" text-anchor="middle">cron</text>
+  <text class="sm mono" x="425" y="395.5" text-anchor="middle">sync_post_views</text>
+  <path class="ln" d="M96 175 L110 175 L110 72 L134 72" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M286 72 L338 88" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M286 128 L338 112" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M286 184 L312 184 L312 122 L338 122" marker-end="url(#ar-a)"/>
+  <path class="ln" d="M211 92 L211 99 L124 99 L124 272 L134 272" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M211 250 V206" marker-end="url(#ar)"/>
+  <text class="sm mono" x="218" y="232">post_save</text>
+  <path class="ln" d="M420 130 L420 168" marker-end="url(#ar)"/>
+  <path class="ln" d="M480 130 L480 140 L512 140 L512 272 L502 272" marker-end="url(#ar)"/>
+  <path class="ln-r" d="M500 190 L545 190 L545 68 L588 68" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M502 262 L560 262 L560 178 L588 178" marker-end="url(#ar-r)"/>
+  <path class="ln-b" d="M286 284 L300 284 L300 330 L575 330 L575 378 L588 378" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M520 392 L588 392" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M215 406 L215 420 L660 420 L660 408" marker-end="url(#ar-b)"/>
+  <path class="ln-r" d="M425 358 L425 344 L745 344 L745 68 L732 68" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M215 358 L215 344 L425 344"/>
+</svg>
+<figcaption>图 B-1　整体架构：Redis 承担业务数据（db0）和缓存（db1）两种角色</figcaption>
 </figure>
 
 <p>几个关键决策：</p>
@@ -78,29 +96,53 @@ flowchart LR
   <li><strong>耗时任务交给后台进程。</strong>通知这类任务通过 Redis Stream 交给独立的 worker 进程处理，不阻塞 Web 请求。</li>
 </ul>
 
-<h2 id="layers"><span class="num">2</span>代码分层与目录</h2>
+<h2 id="layers">代码分层与目录</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart TB
-  subgraph L1["表现层：只管 HTTP 和模板"]
-    views["views.py"]
-    tags["templatetags/blog_tags.py"]
-  end
-  subgraph L2["服务层：每个功能一个模块，不依赖 request"]
-    pv["pageviews"] --- rk["ranking"] --- ca["cache"] --- lk["likes"]
-    ck["checkin"] --- tl["timeline"] --- rc["recommend"] --- rl["ratelimit"]
-    se["search"] --- nt["notifications"]
-  end
-  subgraph L3["基础设施层"]
-    keys["redis_keys.py<br/>所有 Key 的唯一出处"]
-    client["redis_client.py<br/>连接池 / get_redis()"]
-  end
-  L1 --> L2 --> L3
-  </pre></div>
-  <figcaption>图 2　三层结构：views 不直接写 Redis 命令，services 不直接拼 Key 字符串</figcaption>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="代码分层">
+  <rect class="bx-b" x="10" y="10" width="740" height="70" rx="10"/>
+  <text class="ttl on-b" x="26" y="34">表现层</text>
+  <text class="sm" x="26" y="54">只管 HTTP 和模板</text>
+  <rect class="bx" x="240" y="26" width="180" height="38" rx="8"/>
+  <text class="lbl mono" x="330" y="49.5" text-anchor="middle">views.py</text>
+  <rect class="bx" x="440" y="26" width="240" height="38" rx="8"/>
+  <text class="lbl mono" x="560" y="49.5" text-anchor="middle">templatetags/blog_tags.py</text>
+  <rect class="bx-a" x="10" y="104" width="740" height="104" rx="10"/>
+  <text class="ttl on-a" x="26" y="128">服务层</text>
+  <text class="sm" x="26" y="148">每个功能一个模块</text>
+  <text class="sm" x="26" y="166">不依赖 request</text>
+  <rect class="bx" x="170" y="118" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="222" y="139.5" text-anchor="middle">pageviews</text>
+  <rect class="bx" x="284" y="118" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="336" y="139.5" text-anchor="middle">ranking</text>
+  <rect class="bx" x="398" y="118" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="450" y="139.5" text-anchor="middle">cache</text>
+  <rect class="bx" x="512" y="118" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="564" y="139.5" text-anchor="middle">likes</text>
+  <rect class="bx" x="626" y="118" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="678" y="139.5" text-anchor="middle">checkin</text>
+  <rect class="bx" x="170" y="162" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="222" y="183.5" text-anchor="middle">timeline</text>
+  <rect class="bx" x="284" y="162" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="336" y="183.5" text-anchor="middle">recommend</text>
+  <rect class="bx" x="398" y="162" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="450" y="183.5" text-anchor="middle">ratelimit</text>
+  <rect class="bx" x="512" y="162" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="564" y="183.5" text-anchor="middle">search</text>
+  <rect class="bx" x="626" y="162" width="104" height="34" rx="8"/>
+  <text class="sm mono" x="678" y="183.5" text-anchor="middle">notifications</text>
+  <rect class="bx-g" x="10" y="232" width="740" height="60" rx="10"/>
+  <text class="ttl on-g" x="26" y="258">基础设施层</text>
+  <rect class="bx" x="240" y="244" width="220" height="38" rx="8"/>
+  <text class="sm" x="350" y="267.5" text-anchor="middle">redis_keys.py · 所有 Key 的出处</text>
+  <rect class="bx" x="480" y="244" width="220" height="38" rx="8"/>
+  <text class="sm" x="590" y="267.5" text-anchor="middle">redis_client.py · get_redis()</text>
+  <path class="ln" d="M380 80 L380 102" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 208 L380 230" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 B-2　三层结构：views 不直接写 Redis 命令，services 不直接拼 Key 字符串</figcaption>
 </figure>
 
-<pre data-file="Chapter03/mysite/blog/（完成后的目录）"><code>blog/
+<div class="code" data-lang="text" data-file="Chapter03/mysite/blog/（完成后的目录）"><pre>blog/
 ├── redis_client.py          # step-02 连接池，get_redis()
 ├── redis_keys.py            # step-02 起，每一章往里添加 Key 定义
 ├── visitors.py              # step-03 访客标识（登录用户 / 匿名 Session）
@@ -123,10 +165,10 @@ flowchart TB
 │   ├── rebuild_redis_index.py # 从数据库重建索引类数据
 │   └── notify_worker.py     # Stream 消费者
 └── tests/                   # 每个功能一个测试文件
-</code></pre>
+</pre></div>
 
-<h2 id="keys"><span class="num">3</span>Key 命名规范</h2>
-<h3 id="key-rules">3.1 规则</h3>
+<h2 id="keys">Key 命名规范</h2>
+<h3 id="key-rules">规则</h3>
 <ol>
   <li>格式：<code>{前缀}:{实体}:{ID}:{属性}</code>，用冒号分层。RedisInsight 等工具会按冒号把 Key 显示成树。</li>
   <li>统一前缀 <code>blog:</code>（可通过 <code>REDIS_KEY_PREFIX</code> 修改）。多个项目共用一个 Redis 时不会冲突。</li>
@@ -135,133 +177,199 @@ flowchart TB
   <li>临时 Key（计算中间结果、去重标记、锁）<strong>一定要设置 TTL</strong>。</li>
 </ol>
 
-<h3 id="key-table">3.2 全部 Key 一览</h3>
-<div class="table-wrap"><table>
+<h3 id="key-table">全部 Key 一览</h3>
+<div class="tw"><table>
   <thead><tr><th>Key 模式</th><th>类型</th><th>TTL</th><th>章节</th><th>说明</th></tr></thead>
   <tbody>
-    <tr><td><code>blog:post:{id}:views</code></td><td><span class="t string">STRING</span></td><td>永久</td><td>03</td><td>PV 计数</td></tr>
-    <tr><td><code>blog:post:{id}:uv</code></td><td><span class="t hll">HLL</span></td><td>永久</td><td>03</td><td>UV 基数估算</td></tr>
-    <tr><td><code>blog:post:{id}:seen:{visitor}</code></td><td><span class="t string">STRING</span></td><td>30 分钟</td><td>03</td><td>防刷去重标记</td></tr>
-    <tr><td><code>blog:post:views:dirty</code></td><td><span class="t set">SET</span></td><td>永久</td><td>03</td><td>待回写数据库的文章 ID</td></tr>
-    <tr><td><code>blog:rank:views:total</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>04</td><td>总榜</td></tr>
-    <tr><td><code>blog:rank:views:day:{yyyymmdd}</code></td><td><span class="t zset">ZSET</span></td><td>8 天</td><td>04</td><td>日榜</td></tr>
-    <tr><td><code>blog:rank:views:week:{yyyymmdd}</code></td><td><span class="t zset">ZSET</span></td><td>5 分钟</td><td>04</td><td>周榜（7 个日榜的并集，缓存结果）</td></tr>
-    <tr><td><code>blog:lock:{name}</code></td><td><span class="t string">STRING</span></td><td>10 秒</td><td>05</td><td>分布式锁</td></tr>
-    <tr><td><code>cache:1:post:detail:…</code> 等</td><td><span class="t string">STRING</span></td><td>5~10 分钟 ± 抖动</td><td>05</td><td>Django 缓存（db1）</td></tr>
-    <tr><td><code>blog:post:{id}:likers</code></td><td><span class="t set">SET</span></td><td>永久</td><td>06</td><td>点赞用户集合</td></tr>
-    <tr><td><code>blog:user:{id}:likes</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>06</td><td>用户点赞过的文章（按时间）</td></tr>
-    <tr><td><code>blog:checkin:{uid}:{yyyymm}</code></td><td><span class="t bitmap">BITMAP</span></td><td>400 天</td><td>07</td><td>用户月签到日历</td></tr>
-    <tr><td><code>blog:checkin:day:{yyyymmdd}</code></td><td><span class="t bitmap">BITMAP</span></td><td>40 天</td><td>07</td><td>全站每日签到（offset = 用户 ID）</td></tr>
-    <tr><td><code>blog:checkin:week:{yyyymmdd}</code></td><td><span class="t bitmap">BITMAP</span></td><td>60 秒</td><td>07</td><td>BITOP AND 的临时结果（7 天全勤）</td></tr>
-    <tr><td><code>blog:user:{id}:checkin</code></td><td><span class="t hash">HASH</span></td><td>永久</td><td>07</td><td>累计天数 / 连续天数 / 最后日期 / 积分</td></tr>
-    <tr><td><code>blog:user:{id}:following</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我关注的人</td></tr>
-    <tr><td><code>blog:user:{id}:followers</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我的粉丝</td></tr>
-    <tr><td><code>blog:user:{id}:posts</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>08</td><td>作者发件箱（score = 发布时间）</td></tr>
-    <tr><td><code>blog:timeline:{id}</code></td><td><span class="t zset">ZSET</span></td><td>永久，最多 500 条</td><td>08</td><td>用户收件箱 / 时间线</td></tr>
-    <tr><td><code>blog:tag:{slug}:posts</code></td><td><span class="t set">SET</span></td><td>永久</td><td>09</td><td>标签 → 文章 倒排索引</td></tr>
-    <tr><td><code>blog:post:{id}:tags</code></td><td><span class="t set">SET</span></td><td>永久</td><td>09</td><td>文章 → 标签（用于增量更新索引）</td></tr>
-    <tr><td><code>blog:visitor:{vid}:interests</code></td><td><span class="t zset">ZSET</span></td><td>30 天</td><td>09</td><td>兴趣画像（标签 → 权重）</td></tr>
-    <tr><td><code>blog:visitor:{vid}:read</code></td><td><span class="t set">SET</span></td><td>30 天</td><td>09</td><td>已读文章</td></tr>
-    <tr><td><code>blog:recommend:{vid}</code></td><td><span class="t zset">ZSET</span></td><td>60 秒</td><td>09</td><td>推荐结果缓存</td></tr>
-    <tr><td><code>blog:ratelimit:fixed:{scope}:{ident}:{window}</code></td><td><span class="t string">STRING</span></td><td>窗口长度</td><td>10</td><td>固定窗口计数</td></tr>
-    <tr><td><code>blog:ratelimit:sliding:{scope}:{ident}</code></td><td><span class="t zset">ZSET</span></td><td>窗口长度</td><td>10</td><td>滑动窗口请求日志</td></tr>
-    <tr><td><code>blog:search:hot</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>11</td><td>热搜词</td></tr>
-    <tr><td><code>blog:search:history:{vid}</code></td><td><span class="t list">LIST</span></td><td>30 天</td><td>11</td><td>最近 10 条搜索</td></tr>
-    <tr><td><code>blog:search:suggest</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>11</td><td>标题字典序索引（score 全为 0）</td></tr>
-    <tr><td><code>blog:stream:comments</code></td><td><span class="t stream">STREAM</span></td><td>最多约 1 万条</td><td>12</td><td>评论事件</td></tr>
-    <tr><td><code>blog:user:{id}:inbox</code></td><td><span class="t list">LIST</span></td><td>最多 50 条</td><td>12</td><td>站内信</td></tr>
-    <tr><td><code>blog:user:{id}:unread</code></td><td><span class="t string">STRING</span></td><td>永久</td><td>12</td><td>未读数</td></tr>
+    <tr><td><code>blog:post:{id}:views</code></td><td><span class="rt string">STRING</span></td><td>永久</td><td>03</td><td>PV 计数</td></tr>
+    <tr><td><code>blog:post:{id}:uv</code></td><td><span class="rt hll">HLL</span></td><td>永久</td><td>03</td><td>UV 基数估算</td></tr>
+    <tr><td><code>blog:post:{id}:seen:{visitor}</code></td><td><span class="rt string">STRING</span></td><td>30 分钟</td><td>03</td><td>防刷去重标记</td></tr>
+    <tr><td><code>blog:post:views:dirty</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>03</td><td>待回写数据库的文章 ID</td></tr>
+    <tr><td><code>blog:rank:views:total</code></td><td><span class="rt zset">ZSET</span></td><td>永久</td><td>04</td><td>总榜</td></tr>
+    <tr><td><code>blog:rank:views:day:{yyyymmdd}</code></td><td><span class="rt zset">ZSET</span></td><td>8 天</td><td>04</td><td>日榜</td></tr>
+    <tr><td><code>blog:rank:views:week:{yyyymmdd}</code></td><td><span class="rt zset">ZSET</span></td><td>5 分钟</td><td>04</td><td>周榜（7 个日榜的并集，缓存结果）</td></tr>
+    <tr><td><code>blog:lock:{name}</code></td><td><span class="rt string">STRING</span></td><td>10 秒</td><td>05</td><td>分布式锁</td></tr>
+    <tr><td><code>cache:1:post:detail:…</code> 等</td><td><span class="rt string">STRING</span></td><td>5~10 分钟 ± 抖动</td><td>05</td><td>Django 缓存（db1）</td></tr>
+    <tr><td><code>blog:post:{id}:likers</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>06</td><td>点赞用户集合</td></tr>
+    <tr><td><code>blog:user:{id}:likes</code></td><td><span class="rt zset">ZSET</span></td><td>永久</td><td>06</td><td>用户点赞过的文章（按时间）</td></tr>
+    <tr><td><code>blog:checkin:{uid}:{yyyymm}</code></td><td><span class="rt bitmap">BITMAP</span></td><td>400 天</td><td>07</td><td>用户月签到日历</td></tr>
+    <tr><td><code>blog:checkin:day:{yyyymmdd}</code></td><td><span class="rt bitmap">BITMAP</span></td><td>40 天</td><td>07</td><td>全站每日签到（offset = 用户 ID）</td></tr>
+    <tr><td><code>blog:checkin:week:{yyyymmdd}</code></td><td><span class="rt bitmap">BITMAP</span></td><td>60 秒</td><td>07</td><td>BITOP AND 的临时结果（7 天全勤）</td></tr>
+    <tr><td><code>blog:user:{id}:checkin</code></td><td><span class="rt hash">HASH</span></td><td>永久</td><td>07</td><td>累计天数 / 连续天数 / 最后日期 / 积分</td></tr>
+    <tr><td><code>blog:user:{id}:following</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>08</td><td>我关注的人</td></tr>
+    <tr><td><code>blog:user:{id}:followers</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>08</td><td>我的粉丝</td></tr>
+    <tr><td><code>blog:user:{id}:posts</code></td><td><span class="rt zset">ZSET</span></td><td>永久</td><td>08</td><td>作者发件箱（score = 发布时间）</td></tr>
+    <tr><td><code>blog:timeline:{id}</code></td><td><span class="rt zset">ZSET</span></td><td>永久，最多 500 条</td><td>08</td><td>用户收件箱 / 时间线</td></tr>
+    <tr><td><code>blog:tag:{slug}:posts</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>09</td><td>标签 → 文章 倒排索引</td></tr>
+    <tr><td><code>blog:post:{id}:tags</code></td><td><span class="rt set">SET</span></td><td>永久</td><td>09</td><td>文章 → 标签（用于增量更新索引）</td></tr>
+    <tr><td><code>blog:visitor:{vid}:interests</code></td><td><span class="rt zset">ZSET</span></td><td>30 天</td><td>09</td><td>兴趣画像（标签 → 权重）</td></tr>
+    <tr><td><code>blog:visitor:{vid}:read</code></td><td><span class="rt set">SET</span></td><td>30 天</td><td>09</td><td>已读文章</td></tr>
+    <tr><td><code>blog:recommend:{vid}</code></td><td><span class="rt zset">ZSET</span></td><td>60 秒</td><td>09</td><td>推荐结果缓存</td></tr>
+    <tr><td><code>blog:ratelimit:fixed:{scope}:{ident}:{window}</code></td><td><span class="rt string">STRING</span></td><td>窗口长度</td><td>10</td><td>固定窗口计数</td></tr>
+    <tr><td><code>blog:ratelimit:sliding:{scope}:{ident}</code></td><td><span class="rt zset">ZSET</span></td><td>窗口长度</td><td>10</td><td>滑动窗口请求日志</td></tr>
+    <tr><td><code>blog:search:hot</code></td><td><span class="rt zset">ZSET</span></td><td>永久</td><td>11</td><td>热搜词</td></tr>
+    <tr><td><code>blog:search:history:{vid}</code></td><td><span class="rt list">LIST</span></td><td>30 天</td><td>11</td><td>最近 10 条搜索</td></tr>
+    <tr><td><code>blog:search:suggest</code></td><td><span class="rt zset">ZSET</span></td><td>永久</td><td>11</td><td>标题字典序索引（score 全为 0）</td></tr>
+    <tr><td><code>blog:stream:comments</code></td><td><span class="rt stream">STREAM</span></td><td>最多约 1 万条</td><td>12</td><td>评论事件</td></tr>
+    <tr><td><code>blog:user:{id}:inbox</code></td><td><span class="rt list">LIST</span></td><td>最多 50 条</td><td>12</td><td>站内信</td></tr>
+    <tr><td><code>blog:user:{id}:unread</code></td><td><span class="rt string">STRING</span></td><td>永久</td><td>12</td><td>未读数</td></tr>
   </tbody>
 </table></div>
 
-<h2 id="choose"><span class="num">4</span>数据结构选型方法</h2>
+<h2 id="choose">数据结构选型方法</h2>
 <p>面对一个新需求时，可以按下面的顺序判断该用哪种结构。后面每一章的「方案选型」都是按这个思路做的。</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart TD
-  Q{"需要存什么？"} -->|一个值 / 计数器| STR["STRING<br/>INCR · SET NX EX"]
-  Q -->|一个对象的多个字段| HASH["HASH<br/>HINCRBY · HGETALL"]
-  Q -->|一组元素| G{"要排序吗？"}
-  G -->|不要，只要去重和判断是否存在| SET["SET<br/>SADD · SISMEMBER · SINTER"]
-  G -->|按分数 / 时间排序| ZSET["ZSET<br/>ZINCRBY · ZREVRANGE"]
-  G -->|按插入顺序，只要最新 N 条| LIST["LIST<br/>LPUSH · LTRIM"]
-  Q -->|大量是/否状态| BIT["BITMAP<br/>SETBIT · BITCOUNT"]
-  Q -->|只要去重后的数量<br/>能接受误差| HLL["HyperLogLog<br/>PFADD · PFCOUNT"]
-  Q -->|消息要可靠投递、可以重试| STREAM["STREAM<br/>XADD · XREADGROUP · XACK"]
-  </pre></div>
-  <figcaption>图 3　数据结构选型决策树</figcaption>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="数据结构选型决策树">
+  <rect class="bx-y" x="270" y="8" width="220" height="40" rx="8"/>
+  <text class="ttl on-y" x="380" y="32" text-anchor="middle">需要存什么？</text>
+  <path class="ln" d="M380 48 L380 62 L67 62 L67 80" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="10" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-g" x="67" y="104" text-anchor="middle">STRING</text>
+  <text class="sm" x="67" y="122" text-anchor="middle">一个值 / 计数器</text>
+  <text class="sm mono" x="67" y="139" text-anchor="middle">INCR · SET NX</text>
+  <path class="ln" d="M380 48 L380 62 L192 62 L192 80" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="135" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-p" x="192" y="104" text-anchor="middle">HASH</text>
+  <text class="sm" x="192" y="122" text-anchor="middle">对象的多个字段</text>
+  <text class="sm mono" x="192" y="139" text-anchor="middle">HINCRBY</text>
+  <path class="ln" d="M380 48 L380 62 L317 62 L317 80" marker-end="url(#ar)"/>
+  <rect class="bx-y" x="260" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-y" x="317" y="112.5" text-anchor="middle">一组元素</text>
+  <text class="sm" x="317" y="130.5" text-anchor="middle">要排序吗？</text>
+  <path class="ln" d="M380 48 L380 62 L442 62 L442 80" marker-end="url(#ar)"/>
+  <rect class="bx-t" x="385" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-t" x="442" y="104" text-anchor="middle">BITMAP</text>
+  <text class="sm" x="442" y="122" text-anchor="middle">大量是 / 否状态</text>
+  <text class="sm mono" x="442" y="139" text-anchor="middle">SETBIT</text>
+  <path class="ln" d="M380 48 L380 62 L567 62 L567 80" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="510" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-p" x="567" y="104" text-anchor="middle">HyperLogLog</text>
+  <text class="sm" x="567" y="122" text-anchor="middle">只要去重后的数量</text>
+  <text class="sm mono" x="567" y="139" text-anchor="middle">PFCOUNT</text>
+  <path class="ln" d="M380 48 L380 62 L692 62 L692 80" marker-end="url(#ar)"/>
+  <rect class="bx-y" x="635" y="82" width="114" height="70" rx="8"/>
+  <text class="ttl on-y" x="692" y="104" text-anchor="middle">STREAM</text>
+  <text class="sm" x="692" y="122" text-anchor="middle">可靠投递、可重试</text>
+  <text class="sm mono" x="692" y="139" text-anchor="middle">XREADGROUP</text>
+  <path class="ln" d="M317 152 L317 170 L105 170 L105 196" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="40" y="198" width="130" height="70" rx="8"/>
+  <text class="ttl on-a" x="105" y="220" text-anchor="middle">SET</text>
+  <text class="sm" x="105" y="238" text-anchor="middle">去重、判断存在</text>
+  <text class="sm mono" x="105" y="255" text-anchor="middle">SINTER</text>
+  <path class="ln" d="M317 152 L317 170 L255 170 L255 196" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="190" y="198" width="130" height="70" rx="8"/>
+  <text class="ttl on-r" x="255" y="220" text-anchor="middle">ZSET</text>
+  <text class="sm" x="255" y="238" text-anchor="middle">按分数 / 时间排序</text>
+  <text class="sm mono" x="255" y="255" text-anchor="middle">ZREVRANGE</text>
+  <path class="ln" d="M317 152 L317 170 L405 170 L405 196" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="340" y="198" width="130" height="70" rx="8"/>
+  <text class="ttl on-b" x="405" y="220" text-anchor="middle">LIST</text>
+  <text class="sm" x="405" y="238" text-anchor="middle">只要最新 N 条</text>
+  <text class="sm mono" x="405" y="255" text-anchor="middle">LPUSH · LTRIM</text>
+  <text class="sm" x="500" y="230">三种集合的区别在于</text>
+  <text class="sm" x="500" y="248">「要不要排序、按什么排序」</text>
+</svg>
+<figcaption>图 B-3　数据结构选型决策树</figcaption>
 </figure>
 
-<h2 id="truth"><span class="num">5</span>数据以谁为准：一致性策略</h2>
+<h2 id="truth">数据以谁为准：一致性策略</h2>
 <p>把数据放进 Redis 之前，先要决定 Redis 和 PostgreSQL 谁是权威数据源。本项目里有三种情况：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  subgraph A["模式 A：DB 为准，Redis 是副本"]
-    direction TB
-    a1["缓存（05）<br/>标签索引（09）<br/>搜索联想（11）"]
-    a2["丢了可以从 DB 重建<br/>rebuild_redis_index"]
-    a1 --> a2
-  end
-  subgraph B["模式 B：Redis 先写，异步落 DB"]
-    direction TB
-    b1["浏览量（03）"]
-    b2["定时 sync_post_views<br/>Redis 丢失后从 DB 值继续"]
-    b1 --> b2
-  end
-  subgraph C["模式 C：Redis 为主存储"]
-    direction TB
-    c1["点赞 · 签到 · 关注<br/>排行榜 · 限流 · 通知"]
-    c2["靠 AOF 持久化<br/>生产环境建议双写 DB"]
-    c1 --> c2
-  end
-  </pre></div>
-  <figcaption>图 4　三种一致性模式</figcaption>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="三种一致性模式">
+  <rect class="bx-g" x="10" y="10" width="236" height="120" rx="8"/>
+  <text class="ttl on-g" x="128" y="40" text-anchor="middle">模式 A</text>
+  <text class="sm" x="128" y="58" text-anchor="middle">DB 为准，Redis 是副本</text>
+  <text class="lbl" x="128" y="75" text-anchor="middle">缓存（05）</text>
+  <text class="lbl" x="128" y="92" text-anchor="middle">标签索引（09）</text>
+  <text class="lbl" x="128" y="109" text-anchor="middle">搜索联想（11）</text>
+  <rect class="bx" x="10" y="146" width="236" height="60" rx="8"/>
+  <text class="sm" x="128" y="172" text-anchor="middle">丢了可以从 DB 重建</text>
+  <text class="sm mono" x="128" y="189" text-anchor="middle">rebuild_redis_index</text>
+  <path class="ln" d="M128 130 L128 144" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="262" y="10" width="236" height="120" rx="8"/>
+  <text class="ttl on-b" x="380" y="57" text-anchor="middle">模式 B</text>
+  <text class="sm" x="380" y="75" text-anchor="middle">Redis 先写，异步落库</text>
+  <text class="lbl" x="380" y="92" text-anchor="middle">浏览量（03）</text>
+  <rect class="bx" x="262" y="146" width="236" height="60" rx="8"/>
+  <text class="sm" x="380" y="172" text-anchor="middle">Redis 丢失后从 DB 值继续</text>
+  <text class="sm mono" x="380" y="189" text-anchor="middle">sync_post_views</text>
+  <path class="ln" d="M380 130 L380 144" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="514" y="10" width="236" height="120" rx="8"/>
+  <text class="ttl on-r" x="632" y="48.5" text-anchor="middle">模式 C</text>
+  <text class="sm" x="632" y="66.5" text-anchor="middle">Redis 为主存储</text>
+  <text class="lbl" x="632" y="83.5" text-anchor="middle">点赞 · 签到 · 关注</text>
+  <text class="lbl" x="632" y="100.5" text-anchor="middle">排行榜 · 限流 · 通知</text>
+  <rect class="bx" x="514" y="146" width="236" height="60" rx="8"/>
+  <text class="sm" x="632" y="172" text-anchor="middle">靠 AOF 持久化</text>
+  <text class="sm mono" x="632" y="189" text-anchor="middle">生产环境建议双写 DB</text>
+  <path class="ln" d="M632 130 L632 144" marker-end="url(#ar)"/>
+  <text class="sm on-r" x="380" y="236" text-anchor="middle">越往右，Redis 的地位越重要，对持久化的要求也越高</text>
+</svg>
+<figcaption>图 B-4　三种一致性模式</figcaption>
 </figure>
 
-<div class="callout warn">
-  <span class="label">关于模式 C</span>
+<div class="box warn">
+  <div class="t">&#9888; 关于模式 C</div>
   <p>教学项目为了突出 Redis 的用法，把点赞、关注等数据只存在 Redis 里，并在 docker compose 中开启了 <code>appendonly yes</code>（AOF，每秒刷盘），最多丢失约 1 秒的数据。生产环境中这类用户资产通常会<strong>同时写入数据库</strong>（或者通过 Stream 异步写入），Redis 只负责高频读取。</p>
 </div>
 
-<h3 id="sync">5.1 模型变化如何同步到 Redis</h3>
+<h3 id="sync">模型变化如何同步到 Redis</h3>
 <p>文章在后台被修改、下线、删除时，Redis 中的派生数据要跟着更新。统一用 Django 信号处理，views 里不用关心这些：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant Admin as Django Admin
-  participant ORM as Post.save()
-  participant Sig as signals.py
-  participant R as Redis
-  Admin->>ORM: 保存文章（状态 = 已发布）
-  ORM-->>Sig: post_save
-  Sig->>R: 05 删除详情缓存、侧边栏缓存
-  Sig->>R: 08 推送到粉丝的时间线
-  Sig->>R: 11 更新标题联想索引
-  Admin->>ORM: 保存标签 tags.set([...])
-  ORM-->>Sig: m2m_changed
-  Sig->>R: 09 更新 标签→文章 索引
-  Admin->>ORM: 下线 / 删除文章
-  ORM-->>Sig: post_save / post_delete
-  Sig->>R: 04 从榜单移除 · 08 从时间线移除 · 09/11 移出索引
-  </pre></div>
-  <figcaption>图 5　信号驱动的同步：每个章节往 signals.py 里添加自己的处理函数</figcaption>
+<svg class="dgm" viewBox="0 0 760 474" role="img" aria-label="信号驱动的同步">
+  <path class="life" d="M96.9125 54 L96.9125 468"/>
+  <path class="life" d="M284.742 54 L284.742 468"/>
+  <path class="life" d="M471.851 54 L471.851 468"/>
+  <path class="life" d="M676 54 L676 468"/>
+  <rect class="bx" x="36" y="14" width="121.825" height="40" rx="8"/>
+  <text class="ttl" x="96.9125" y="39" text-anchor="middle">Django Admin</text>
+  <rect class="bx-b" x="230.242" y="14" width="109" height="40" rx="8"/>
+  <text class="ttl on-b" x="284.742" y="39" text-anchor="middle">Post.save()</text>
+  <rect class="bx-a" x="423.851" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-a" x="471.851" y="39" text-anchor="middle">signals.py</text>
+  <rect class="bx-r" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="676" y="39" text-anchor="middle">Redis</text>
+  <text class="lbl" x="190.827" y="76" text-anchor="middle">保存文章（状态 = 已发布）</text>
+  <path class="ln" d="M101.912 82 L278.742 82" marker-end="url(#ar)"/>
+  <text class="lbl" x="378.296" y="110" text-anchor="middle">post_save</text>
+  <path class="ln-d" d="M289.742 116 L465.851 116" marker-end="url(#ar)"/>
+  <text class="lbl" x="573.925" y="144" text-anchor="middle">05 删除详情缓存、侧边栏缓存</text>
+  <path class="ln-a" d="M476.851 150 L670 150" marker-end="url(#ar-a)"/>
+  <text class="lbl" x="573.925" y="178" text-anchor="middle">08 推送到粉丝的时间线</text>
+  <path class="ln-a" d="M476.851 184 L670 184" marker-end="url(#ar-a)"/>
+  <text class="lbl" x="573.925" y="212" text-anchor="middle">11 更新标题联想索引</text>
+  <path class="ln-a" d="M476.851 218 L670 218" marker-end="url(#ar-a)"/>
+  <text class="lbl" x="190.827" y="246" text-anchor="middle">保存标签 tags.set([...])</text>
+  <path class="ln" d="M101.912 252 L278.742 252" marker-end="url(#ar)"/>
+  <text class="lbl" x="378.296" y="280" text-anchor="middle">m2m_changed</text>
+  <path class="ln-d" d="M289.742 286 L465.851 286" marker-end="url(#ar)"/>
+  <text class="lbl" x="573.925" y="314" text-anchor="middle">09 更新 标签 → 文章 索引</text>
+  <path class="ln-a" d="M476.851 320 L670 320" marker-end="url(#ar-a)"/>
+  <text class="lbl" x="190.827" y="348" text-anchor="middle">下线 / 删除文章</text>
+  <path class="ln" d="M101.912 354 L278.742 354" marker-end="url(#ar)"/>
+  <text class="lbl" x="378.296" y="382" text-anchor="middle">post_save / post_delete</text>
+  <path class="ln-d" d="M289.742 388 L465.851 388" marker-end="url(#ar)"/>
+  <text class="lbl" x="573.925" y="416" text-anchor="middle">04 移出榜单 · 08 移出时间线</text>
+  <text class="lbl" x="573.925" y="432" text-anchor="middle">09/11 移出索引</text>
+  <path class="ln-a" d="M476.851 438 L670 438" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 B-5　信号驱动的同步：每个章节往 signals.py 里添加自己的处理函数</figcaption>
 </figure>
 
-<h2 id="perf"><span class="num">6</span>性能约定</h2>
-<div class="compare">
-  <div class="bad">
-    <h4>不要这样写</h4>
-<pre><code class="language-python"># 列表页 10 篇文章 → 10 次网络往返
+<h2 id="perf">性能约定</h2>
+<div class="vs">
+  <div class="old">
+    <div class="h">&#10007; 不要这样写</div>
+<div class="code" data-lang="python"><pre># 列表页 10 篇文章 → 10 次网络往返
 for post in posts:
-    post.views = r.get(f'blog:post:{post.id}:views')</code></pre>
+    post.views = r.get(f'blog:post:{post.id}:views')</pre></div>
   </div>
-  <div class="good">
-    <h4>应该这样写</h4>
-<pre><code class="language-python"># 1 次往返拿到全部
+  <div class="new">
+    <div class="h">&#10003; 应该这样写</div>
+<div class="code" data-lang="python"><pre># 1 次往返拿到全部
 keys = [K.post_views(p.id) for p in posts]
 for post, v in zip(posts, r.mget(keys)):
-    post.views = int(v or 0)</code></pre>
+    post.views = int(v or 0)</pre></div>
   </div>
 </div>
 <ul>
@@ -271,53 +379,80 @@ for post, v in zip(posts, r.mget(keys)):
   <li><strong>大集合控制大小</strong>：时间线 <code>ZREMRANGEBYRANK</code> 截断到 500，收件箱 <code>LTRIM</code> 到 50，Stream 用 <code>MAXLEN ~</code> 截断。</li>
 </ul>
 
-<h2 id="visitor"><span class="num">7</span>访客标识</h2>
+<h2 id="visitor">访客标识</h2>
 <p>浏览量、推荐、搜索历史这些功能对匿名用户也要生效，所以需要一个统一的「访客 ID」：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  R["request"] --> A{"已登录？"}
-  A -->|是| U["u:{user.id}<br/>例：u:3"]
-  A -->|否| S{"有 session_key？"}
-  S -->|有| SK["s:{session_key}"]
-  S -->|没有| NEW["session.save() 生成一个"] --> SK
-  </pre></div>
-  <figcaption>图 6　<code>visitors.get_visitor_id(request)</code> 的逻辑</figcaption>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="get_visitor_id 的逻辑">
+  <rect class="bx" x="10" y="60" width="90" height="44" rx="8"/>
+  <text class="lbl mono" x="55" y="86.5" text-anchor="middle">request</text>
+  <rect class="bx-y" x="140" y="60" width="110" height="44" rx="8"/>
+  <text class="ttl on-y" x="195" y="86" text-anchor="middle">已登录？</text>
+  <rect class="bx-g" x="300" y="8" width="160" height="44" rx="8"/>
+  <text class="lbl mono" x="380" y="26" text-anchor="middle">u:{user.id}</text>
+  <text class="sm" x="380" y="43" text-anchor="middle">例：u:3</text>
+  <rect class="bx-y" x="300" y="110" width="160" height="44" rx="8"/>
+  <text class="ttl on-y" x="380" y="136" text-anchor="middle">有 session_key？</text>
+  <rect class="bx-g" x="590" y="110" width="160" height="44" rx="8"/>
+  <text class="lbl mono" x="670" y="136.5" text-anchor="middle">s:{session_key}</text>
+  <rect class="bx" x="430" y="168" width="130" height="44" rx="8"/>
+  <text class="sm mono" x="495" y="186" text-anchor="middle">session.save()</text>
+  <text class="sm" x="495" y="203" text-anchor="middle">先生成一个</text>
+  <path class="ln" d="M100 82 L138 82" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M195 60 L195 30 L298 30" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="205" y="24">是</text>
+  <path class="ln" d="M195 104 L195 132 L298 132" marker-end="url(#ar)"/>
+  <text class="sm" x="205" y="148">否</text>
+  <path class="ln-g" d="M460 132 L588 132" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="524" y="126" text-anchor="middle">有</text>
+  <path class="ln-d" d="M380 154 L380 190 L428 190" marker-end="url(#ar)"/>
+  <text class="sm" x="390" y="176">没有</text>
+  <path class="ln" d="M560 190 L670 190 L670 156" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 B-6　<code>visitors.get_visitor_id(request)</code> 的逻辑</figcaption>
 </figure>
 
-<h2 id="test"><span class="num">8</span>测试策略</h2>
+<h2 id="test">测试策略</h2>
 <ul>
   <li>测试连接<strong>真实的 Redis</strong>（不用 mock），这样测到的就是真实命令的行为；使用 db15（业务）和 db14（缓存），不会影响开发数据。</li>
   <li><code>RedisTestCase</code> 基类在每个用例开始前执行 <code>FLUSHDB</code>，保证用例之间互不影响。</li>
   <li>服务层测试直接调用 service 函数；视图层测试用 Django <code>Client</code> 走完整请求，再到 Redis 里检查数据。</li>
 </ul>
-<pre class="cli"><code><span class="prompt">$ </span>python manage.py test blog -v 2
-<span class="out">test_dedup_within_window (blog.tests.test_pageviews.PageViewServiceTests) ... ok
+<div class="code" data-lang="cli"><pre>$ python manage.py test blog -v 2
+test_dedup_within_window (blog.tests.test_pageviews.PageViewServiceTests) ... ok
 test_weekly_union (blog.tests.test_ranking.RankingTests) ... ok
-...</span></code></pre>
+...</pre></div>
 
-<h2 id="deploy"><span class="num">9</span>部署拓扑</h2>
+<h2 id="deploy">部署拓扑</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart TB
-  subgraph compose["docker compose"]
-    web_run["web_run<br/>runserver :8000"]
-    web_worker["web_worker<br/>notify_worker"]
-    web_migrate["web_migrate<br/>一次性 migrate"]
-    db[("db<br/>postgres:16")]
-    redis[("redis<br/>redis:7.4 · AOF")]
-  end
-  web_run --> db
-  web_run --> redis
-  web_worker --> db
-  web_worker --> redis
-  web_migrate --> db
-  </pre></div>
-  <figcaption>图 7　docker compose 服务：step-02 增加 redis，step-12 增加 web_worker</figcaption>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="docker compose 服务">
+  <rect class="bx-d" x="10" y="10" width="740" height="210" rx="10"/>
+  <text class="ttl" x="26" y="34">docker compose</text>
+  <rect class="bx-a" x="60" y="50" width="180" height="50" rx="8"/>
+  <text class="ttl on-a" x="150" y="70.5" text-anchor="middle">web_run</text>
+  <text class="sm mono" x="150" y="88.5" text-anchor="middle">runserver :8000</text>
+  <rect class="bx-y" x="290" y="50" width="180" height="50" rx="8"/>
+  <text class="ttl on-y" x="380" y="70.5" text-anchor="middle">web_worker</text>
+  <text class="sm" x="380" y="88.5" text-anchor="middle">notify_worker · step-12</text>
+  <rect class="bx" x="520" y="50" width="180" height="50" rx="8"/>
+  <text class="ttl" x="610" y="70.5" text-anchor="middle">web_migrate</text>
+  <text class="sm" x="610" y="88.5" text-anchor="middle">一次性 migrate</text>
+  <rect class="bx-b" x="150" y="150" width="200" height="50" rx="8"/>
+  <text class="ttl on-b" x="250" y="170.5" text-anchor="middle">db</text>
+  <text class="sm mono" x="250" y="188.5" text-anchor="middle">postgres:16</text>
+  <rect class="bx-r" x="410" y="150" width="200" height="50" rx="8"/>
+  <text class="ttl on-r" x="510" y="170.5" text-anchor="middle">redis</text>
+  <text class="sm" x="510" y="188.5" text-anchor="middle">redis:7.4 · AOF · step-02</text>
+  <path class="ln-b" d="M150 100 L170 148" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M380 100 L270 148" marker-end="url(#ar-b)"/>
+  <path class="ln-r" d="M170 100 L480 148" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M400 100 L510 148" marker-end="url(#ar-r)"/>
+  <path class="ln-b" d="M610 100 L300 148" marker-end="url(#ar-b)"/>
+</svg>
+<figcaption>图 B-7　docker compose 服务：step-02 增加 redis，step-12 增加 web_worker</figcaption>
 </figure>
 
-<h2 id="degrade"><span class="num">10</span>风险与降级</h2>
-<div class="table-wrap"><table>
+<h2 id="degrade">风险与降级</h2>
+<div class="tw"><table>
   <thead><tr><th>风险</th><th>影响</th><th>本项目的处理</th><th>生产环境建议</th></tr></thead>
   <tbody>
     <tr><td>Redis 宕机</td><td>所有依赖 Redis 的功能报错</td><td>教学项目将 Redis 视为强依赖</td><td>在 service 层捕获 <code>redis.ConnectionError</code>：计数类直接跳过，展示类回落到数据库查询</td></tr>
@@ -327,12 +462,10 @@ flowchart TB
   </tbody>
 </table></div>
 
-<div class="pager">
-  <a href="01-prd.html"><small>上一篇</small>← 产品需求文档</a>
-  <a class="next" href="features/02-redis-setup.html"><small>下一篇</small>step-02 接入 Redis →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="assets/site.js"></script>
 </body>
 </html>

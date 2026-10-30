@@ -2,200 +2,116 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Django × Redis 实战</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="index.html">首页</a>
-    <a href="01-prd.html">PRD</a>
-    <a href="02-design.html">设计文档</a>
-    <a href="index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="index">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
 <section class="hero">
-  <div class="eyebrow">教学项目 · Django 5 By Example 第 3 章博客</div>
+  <span class="chapter-eyebrow">教学项目 · 10 个功能 · 13 个 git tag</span>
   <h1>用一个博客，把 Redis 的常见用法走一遍</h1>
-  <p class="lead">从《Django 5 By Example》第一个博客项目出发，给它加上浏览量、排行榜、缓存、点赞、签到、关注时间线、个性化推荐、限流、热搜和消息通知。每个功能对应一个 git tag，一份文档，一组测试。</p>
-  <div class="meta">
-    <span class="pill">Django 5.2</span>
-    <span class="pill">Redis 7.4</span>
-    <span class="pill">redis-py 5.2</span>
-    <span class="pill">PostgreSQL 16</span>
-    <span class="pill">8 种数据结构 + Lua</span>
+  <p class="sub">
+    从《Django 5 By Example》第 3 章的博客项目出发，逐步加上浏览量、排行榜、缓存、点赞、签到、关注时间线、个性化推荐、限流、热搜和评论通知。
+    每个功能对应<strong>一个 git tag、一份文档、一组测试</strong>，可以一步步 checkout 回放。
+  </p>
+  <div style="margin-top:16px">
+    <span class="pill">Django 5.2</span><span class="pill">Redis 7.4</span><span class="pill">redis-py 5.2</span>
+    <span class="pill">PostgreSQL 16</span><span class="pill">STRING · HASH · LIST · SET · ZSET</span>
+    <span class="pill">Bitmap · HyperLogLog · Stream · Lua</span>
   </div>
 </section>
 
 <h2 id="how">怎么用这份文档</h2>
-<p>建议按下面的顺序读，每读完一章就 <code>git checkout</code> 到对应的 tag，把代码跑起来，再用 <code>redis-cli</code> 看看 Redis 里到底存了什么。</p>
+<p>建议按下面的顺序读：先看 PRD 和设计文档了解全局，然后每读完一章就 <code>git checkout</code> 到对应的 tag，把代码跑起来，再用 <code>redis-cli</code> 看看 Redis 里到底存了什么。</p>
 
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  A["📄 PRD<br/>要做什么、为什么"] --> B["📐 设计文档<br/>整体架构、Key 规范"]
-  B --> C["🔧 step-02<br/>接入 Redis"]
-  C --> D["📈 step-03 ~ 12<br/>逐个功能"]
-  D --> E["🧪 动手实验<br/>redis-cli 观察数据"]
-  E -->|下一章| D
-  </pre></div>
-  <figcaption>图 1　学习路径：先读需求和设计，再按 tag 逐章推进</figcaption>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="学习路径">
+  <rect class="bx-b" x="10" y="30" width="150" height="64" rx="8"/>
+  <text class="ttl on-b" x="85" y="56" text-anchor="middle">PRD</text>
+  <text class="sm" x="85" y="76" text-anchor="middle">要做什么、为什么</text>
+  <rect class="bx-p" x="200" y="30" width="150" height="64" rx="8"/>
+  <text class="ttl on-p" x="275" y="56" text-anchor="middle">设计文档</text>
+  <text class="sm" x="275" y="76" text-anchor="middle">架构、Key 规范</text>
+  <rect class="bx-a" x="390" y="30" width="170" height="64" rx="8"/>
+  <text class="ttl on-a" x="475" y="56" text-anchor="middle">step-02 ~ 12</text>
+  <text class="sm" x="475" y="76" text-anchor="middle">每章一个功能、一个 tag</text>
+  <rect class="bx-g" x="600" y="30" width="150" height="64" rx="8"/>
+  <text class="ttl on-g" x="675" y="56" text-anchor="middle">动手实验</text>
+  <text class="sm" x="675" y="76" text-anchor="middle">redis-cli 观察数据</text>
+  <path class="ln" d="M160 62 H197" marker-end="url(#ar)"/>
+  <path class="ln" d="M350 62 H387" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M560 62 H597" marker-end="url(#ar-a)"/>
+  <path class="ln-d" d="M675 96 V124 H475 V98" marker-end="url(#ar)"/>
+  <text class="sm" x="575" y="140" text-anchor="middle">下一章</text>
+</svg>
+<figcaption>图 1　学习路径：先读需求和设计，再按 tag 逐章推进</figcaption>
 </figure>
 
 <p>每一章的结构都一样：</p>
 <ol class="steps">
   <li><strong>场景分析</strong>：业务上要解决什么问题，只用数据库为什么不够好。</li>
-  <li><strong>方案选型</strong>：几种 Redis 数据结构放在一起比，说明为什么选这一种。</li>
-  <li><strong>Key 设计</strong>：用卡片画出 Redis 里存的内容。</li>
-  <li><strong>流程图</strong>：一次请求里 Django 和 Redis 怎么交互。</li>
-  <li><strong>代码实现</strong>：文档里的代码由 <code>docs/tools/sync_code.py</code> 从源码同步过来，和仓库里的一致。</li>
-  <li><strong>动手实验 &amp; 思考题</strong>：用 redis-cli 验证，再看看边界情况。</li>
+  <li><strong>方案选型</strong>：把几种 Redis 数据结构放在一起比较，说明为什么选这一种。</li>
+  <li><strong>Key 设计</strong>：用卡片画出 Redis 里实际存的内容。</li>
+  <li><strong>流程图</strong>：一次请求里 Django 和 Redis 是怎么交互的。</li>
+  <li><strong>代码实现</strong>：文档里的代码由 <code>docs/tools/sync_code.py</code> 从源码同步，和仓库里完全一致。</li>
+  <li><strong>动手实验与思考题</strong>：用 redis-cli 验证，再想想边界情况。</li>
 </ol>
 
 <h2 id="quickstart">快速开始</h2>
-<pre class="cli"><code><span class="cmt"># 1. 启动 Postgres + Redis + Django（docker compose）</span>
-<span class="prompt">$ </span>cd Chapter03
-<span class="prompt">$ </span>docker compose up -d web_run
-<span class="cmt"># 2. 造一些演示数据：用户 alice / bob / carol，密码都是 redis123</span>
-<span class="prompt">$ </span>docker compose exec web_run python /code/mysite/manage.py seed_demo
-<span class="cmt"># 3. 打开 http://localhost:8000/blog/ ，另开一个终端观察 Redis</span>
-<span class="prompt">$ </span>docker compose exec redis redis-cli MONITOR</code></pre>
+<div class="code" data-lang="cli"><pre>
+# 1. 启动 Postgres + Redis + Django + 通知 worker
+$ cd Chapter03
+$ docker compose up -d web_run web_worker
+# 2. 造一些演示数据：用户 alice / bob / carol，密码都是 redis123
+$ docker compose exec web_run python /code/mysite/manage.py seed_demo
+# 3. 打开 http://localhost:8000/blog/ ，另开一个终端观察 Redis 收到的每一条命令
+$ docker compose exec redis redis-cli MONITOR
+</pre></div>
 
-<div class="callout tip">
-  <span class="label">在两个 tag 之间看差异</span>
+<div class="box tip">
+  <div class="t">&#10003; 在两个 tag 之间看差异</div>
   <p>想知道某个功能改了哪些代码：<code>git diff step-02-redis-setup step-03-page-views -- Chapter03</code>；想回到某一步：<code>git checkout step-05-cache</code>；列出所有 tag：<code>git tag -l "step-*"</code>。</p>
 </div>
 
-<p>不用 docker 也行，本地跑测试的方式：</p>
-<pre class="cli"><code><span class="prompt">$ </span>pip install -r Chapter03/requirements.txt psycopg[binary]
-<span class="prompt">$ </span>export DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres DB_NAME=postgres
-<span class="prompt">$ </span>export REDIS_URL=redis://localhost:6379/0
-<span class="prompt">$ </span>cd Chapter03/mysite &amp;&amp; python manage.py test blog   <span class="cmt"># 测试使用 Redis 的 db 14/15，不会碰开发数据</span></code></pre>
+<p>不用 docker 也可以，本地跑测试的方式：</p>
+<div class="code" data-lang="cli"><pre>
+$ pip install -r Chapter03/requirements.txt psycopg[binary]
+$ export DB_HOST=localhost DB_USER=postgres DB_PASSWORD=postgres DB_NAME=postgres
+$ export REDIS_URL=redis://localhost:6379/0
+$ cd Chapter03/mysite &amp;&amp; python manage.py test blog   # 测试使用 Redis 的 db14/15，不会碰开发数据
+</pre></div>
 
-<h2 id="docs">设计类文档</h2>
-<div class="cards">
-  <a class="card" href="01-prd.html">
-    <div class="k">01 · PRD</div>
-    <h4>产品需求文档</h4>
-    <p>用户角色、功能清单、用户故事、验收标准、非功能需求。</p>
-  </a>
-  <a class="card" href="02-design.html">
-    <div class="k">02 · DESIGN</div>
-    <h4>系统设计文档</h4>
-    <p>整体架构、模块划分、Key 命名规范、数据结构选型、一致性策略、测试策略。</p>
-  </a>
-</div>
-
-<h2 id="chapters">功能章节与 Git Tag</h2>
-<p>tag 的名字和章节编号一一对应。每个 tag 都是一个能跑、测试能过的完整版本。</p>
-
-<div class="cards">
-  <a class="card" href="features/02-redis-setup.html">
-    <div class="k">step-02-redis-setup</div>
-    <h4>接入 Redis</h4>
-    <p>docker compose、连接池、Key 规范、测试基类、演示数据。</p>
-    <div class="types"><span class="t string">CLIENT</span></div>
-  </a>
-  <a class="card" href="features/03-page-views.html">
-    <div class="k">step-03-page-views</div>
-    <h4>文章浏览量 PV / UV</h4>
-    <p>原子计数、防刷去重、UV 去重统计、定时回写数据库。</p>
-    <div class="types"><span class="t string">STRING</span><span class="t hll">HLL</span><span class="t set">SET</span></div>
-  </a>
-  <a class="card" href="features/04-hot-ranking.html">
-    <div class="k">step-04-hot-ranking</div>
-    <h4>热门排行榜</h4>
-    <p>总榜、日榜、周榜，用 ZUNIONSTORE 合并多日数据。</p>
-    <div class="types"><span class="t zset">ZSET</span></div>
-  </a>
-  <a class="card" href="features/05-cache.html">
-    <div class="k">step-05-cache</div>
-    <h4>页面与查询缓存</h4>
-    <p>Cache-Aside 模式，处理缓存穿透、击穿、雪崩，以及分布式锁。</p>
-    <div class="types"><span class="t string">STRING</span><span class="t lua">LUA</span></div>
-  </a>
-  <a class="card" href="features/06-likes.html">
-    <div class="k">step-06-likes</div>
-    <h4>点赞</h4>
-    <p>幂等的点赞与取消、判断是否已赞、按时间列出「我赞过的」。</p>
-    <div class="types"><span class="t set">SET</span><span class="t zset">ZSET</span></div>
-  </a>
-  <a class="card" href="features/07-checkin.html">
-    <div class="k">step-07-checkin</div>
-    <h4>用户签到</h4>
-    <p>一个月的签到只占 4 字节；用 Hash 记录跨月连续天数和积分，统计每日签到人数。</p>
-    <div class="types"><span class="t bitmap">BITMAP</span><span class="t hash">HASH</span></div>
-  </a>
-  <a class="card" href="features/08-timeline.html">
-    <div class="k">step-08-follow-timeline</div>
-    <h4>关注与时间线</h4>
-    <p>关注关系、共同关注、写扩散 Feed 流、游标分页。</p>
-    <div class="types"><span class="t set">SET</span><span class="t zset">ZSET</span></div>
-  </a>
-  <a class="card" href="features/09-recommend.html">
-    <div class="k">step-09-recommend</div>
-    <h4>个性化推荐</h4>
-    <p>用户兴趣画像、按标签加权合并、排除已读、冷启动兜底。</p>
-    <div class="types"><span class="t zset">ZSET</span><span class="t set">SET</span></div>
-  </a>
-  <a class="card" href="features/10-rate-limit.html">
-    <div class="k">step-10-rate-limit</div>
-    <h4>接口限流</h4>
-    <p>固定窗口和滑动窗口两种算法，用 Lua 保证原子性，防评论刷屏。</p>
-    <div class="types"><span class="t string">STRING</span><span class="t zset">ZSET</span><span class="t lua">LUA</span></div>
-  </a>
-  <a class="card" href="features/11-search.html">
-    <div class="k">step-11-search</div>
-    <h4>热搜、搜索历史与联想</h4>
-    <p>热搜词榜单、每人最近 10 条搜索、按字典序做前缀联想。</p>
-    <div class="types"><span class="t zset">ZSET</span><span class="t list">LIST</span></div>
-  </a>
-  <a class="card" href="features/12-notifications.html">
-    <div class="k">step-12-notifications</div>
-    <h4>评论通知（消息队列）</h4>
-    <p>Stream 消费组做异步任务，ACK、失败重投，站内信收件箱。</p>
-    <div class="types"><span class="t stream">STREAM</span><span class="t list">LIST</span><span class="t string">STRING</span></div>
-  </a>
-</div>
+<h2 id="chapters">全部章节</h2>
+<p>tag 的名字和章节编号一一对应，每个 tag 都是一个能跑、测试能通过的完整版本。</p>
+<div id="toc-grid"></div>
 
 <h2 id="matrix">数据结构 × 功能 速查表</h2>
-<p>下面这张表可以当复习提纲用：每种数据结构在项目里的哪些地方用到。</p>
-<div class="table-wrap">
+<p>可以当复习提纲用：每种数据结构在项目里的哪些地方用到。</p>
+<div class="tw">
 <table>
   <thead><tr><th>数据结构</th><th>核心命令</th><th>在本项目中的用途</th></tr></thead>
   <tbody>
-    <tr><td><span class="t string">STRING</span></td><td><code>INCR</code> <code>SET NX EX</code> <code>MGET</code></td><td>浏览量计数、防刷标记、缓存值、分布式锁、固定窗口限流、未读数</td></tr>
-    <tr><td><span class="t hash">HASH</span></td><td><code>HINCRBY</code> <code>HSET</code> <code>HGETALL</code></td><td>用户签到统计：累计天数、连续天数、最后签到日期、积分</td></tr>
-    <tr><td><span class="t hll">HLL</span></td><td><code>PFADD</code> <code>PFCOUNT</code></td><td>文章独立访客数 UV（固定 12KB，误差约 0.81%）</td></tr>
-    <tr><td><span class="t set">SET</span></td><td><code>SADD</code> <code>SISMEMBER</code> <code>SINTER</code> <code>SPOP</code></td><td>点赞用户、关注/粉丝、共同关注、标签→文章索引、已读集合、待回写队列</td></tr>
-    <tr><td><span class="t zset">ZSET</span></td><td><code>ZINCRBY</code> <code>ZREVRANGE</code> <code>ZUNIONSTORE</code> <code>ZRANGEBYLEX</code></td><td>排行榜、时间线、兴趣画像、推荐结果、滑动窗口限流、热搜词、搜索联想</td></tr>
-    <tr><td><span class="t list">LIST</span></td><td><code>LPUSH</code> <code>LTRIM</code> <code>LRANGE</code></td><td>最近搜索历史、站内信收件箱（固定长度的最新 N 条）</td></tr>
-    <tr><td><span class="t bitmap">BITMAP</span></td><td><code>SETBIT</code> <code>BITCOUNT</code> <code>BITFIELD</code> <code>BITOP</code></td><td>用户签到日历、连续签到、每日签到人数、连续 N 天都签到的用户</td></tr>
-    <tr><td><span class="t stream">STREAM</span></td><td><code>XADD</code> <code>XREADGROUP</code> <code>XACK</code> <code>XAUTOCLAIM</code></td><td>评论事件的异步消息队列</td></tr>
-    <tr><td><span class="t lua">LUA</span></td><td><code>EVALSHA</code></td><td>限流计数、安全释放锁（多条命令合成一个原子操作）</td></tr>
+    <tr><td><span class="rt string">STRING</span></td><td><code>INCR</code> <code>SET NX EX</code> <code>MGET</code></td><td>浏览量计数、防刷标记、缓存值、分布式锁、固定窗口限流、未读数</td></tr>
+    <tr><td><span class="rt hash">HASH</span></td><td><code>HINCRBY</code> <code>HSET</code> <code>HGETALL</code></td><td>用户签到统计：累计天数、连续天数、最后签到日期、积分</td></tr>
+    <tr><td><span class="rt hll">HLL</span></td><td><code>PFADD</code> <code>PFCOUNT</code></td><td>文章独立访客数 UV（固定 12KB，误差约 0.81%）</td></tr>
+    <tr><td><span class="rt set">SET</span></td><td><code>SADD</code> <code>SISMEMBER</code> <code>SINTER</code> <code>SPOP</code></td><td>点赞用户、关注 / 粉丝、共同关注、标签 → 文章索引、已读集合、待回写队列</td></tr>
+    <tr><td><span class="rt zset">ZSET</span></td><td><code>ZINCRBY</code> <code>ZREVRANGE</code> <code>ZUNIONSTORE</code> <code>ZRANGEBYLEX</code></td><td>排行榜、时间线、兴趣画像、推荐结果、滑动窗口限流、热搜词、搜索联想</td></tr>
+    <tr><td><span class="rt list">LIST</span></td><td><code>LPUSH</code> <code>LTRIM</code> <code>LRANGE</code></td><td>最近搜索历史、站内信收件箱（固定长度的最新 N 条）</td></tr>
+    <tr><td><span class="rt bitmap">BITMAP</span></td><td><code>SETBIT</code> <code>BITCOUNT</code> <code>BITFIELD</code> <code>BITOP</code></td><td>签到日历、每日签到人数、连续 7 天都签到的用户</td></tr>
+    <tr><td><span class="rt stream">STREAM</span></td><td><code>XADD</code> <code>XREADGROUP</code> <code>XACK</code> <code>XAUTOCLAIM</code></td><td>评论事件的异步消息队列</td></tr>
+    <tr><td><span class="rt lua">LUA</span></td><td><code>EVALSHA</code></td><td>限流计数、安全释放锁（把多条命令合成一个原子操作）</td></tr>
   </tbody>
 </table>
 </div>
 
-<footer class="foot">
-  文档中的代码片段由 <code>python3 docs/tools/sync_code.py</code> 从源码自动同步。所有图在浏览器中由 Mermaid 渲染，需要联网加载 CDN。
-</footer>
+<p class="foot">文档中的代码片段由 <code>python3 docs/tools/sync_code.py</code> 从源码自动同步。页面不依赖任何外部资源，直接双击打开即可离线阅读。</p>
 
 </main>
 </div>
+<script src="assets/site.js"></script>
 </body>
 </html>

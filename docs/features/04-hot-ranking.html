@@ -2,99 +2,91 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>热门排行榜</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>热门排行榜 — Django × Redis 实战</title>
 <link rel="stylesheet" href="../assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="../assets/doc.js"></script>
-<style>
-  .sk text { font: 12px "JetBrains Mono", monospace; fill: var(--text); }
-  .sk .node { fill: var(--surface); stroke: var(--t-zset); stroke-width: 1.5; }
-  .sk .head { fill: var(--surface-2); stroke: var(--muted); }
-  .sk .ln { stroke: var(--muted); stroke-width: 1.2; marker-end: url(#arr); }
-  .sk .hot { stroke: var(--accent); stroke-width: 2.2; }
-  .sk .lbl { fill: var(--muted); font-size: 11px; }
-  .sk .hash { fill: var(--surface); stroke: var(--t-hash); stroke-width: 1.5; }
-</style>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="../index.html">首页</a>
-    <a href="../01-prd.html">PRD</a>
-    <a href="../02-design.html">设计文档</a>
-    <a href="../index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="04">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">Step 04 · 有序集合</div>
-  <h1>热门排行榜：总榜、日榜、周榜</h1>
-  <p class="lead">排行榜是有序集合（ZSET）最常见的用途。这一章用 ZINCRBY 实时累加热度，用 ZREVRANGE 取前 N 名，用按天拆分的 Key 加 ZUNIONSTORE 实现「最近 7 天」的周榜。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">Step 04 · 有序集合</span>
+<h1>热门排行榜：总榜、日榜、周榜</h1>
+<p class="lede">排行榜是有序集合（ZSET）最常见的用途。这一章用 ZINCRBY 实时累加热度，用 ZREVRANGE 取前 N 名，用按天拆分的 Key 加 ZUNIONSTORE 实现「最近 7 天」的周榜。</p>
+<div class="meta">
     <span class="pill tag">git checkout step-04-hot-ranking</span>
-    <span class="t zset">ZSET</span>
-  </div>
-</section>
+    <span class="rt zset">ZSET</span>
+</div>
 
-<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 ZSET 的跳表 + 哈希表结构</li>
+    <li>用 <code>ZINCRBY</code> / <code>ZREVRANGE</code> 实现实时榜单</li>
+    <li>用按天拆分的 Key 加 <code>ZUNIONSTORE</code> 实现周榜</li>
+    <li>用信号让榜单和数据库保持一致</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">场景分析</h2>
 <p>PRD F2 要求：侧边栏展示本周热门前 5，<code>/blog/ranking/</code> 页面展示今日、近 7 天、总榜前 10，热度实时更新，下线的文章不能出现在榜单里。</p>
-<h3 id="sql">1.1 用 SQL 怎么做</h3>
+<h3 id="sql">用 SQL 怎么做</h3>
 <ul>
   <li><strong>总榜</strong>：<code>ORDER BY views DESC LIMIT 10</code>。需要在 views 上建索引，而 views 每次浏览都在变，索引维护成本高。</li>
   <li><strong>日榜 / 周榜</strong>：需要一张「浏览日志」表，每次浏览插入一行，查询时 <code>WHERE date &gt;= ... GROUP BY post_id ORDER BY COUNT(*)</code>。数据量越大越慢。</li>
 </ul>
 <p>排行榜的特点是<strong>更新频繁、读取频繁、只关心前几名</strong>，适合用 ZSET。</p>
 
-<h2 id="zset"><span class="num">2</span>ZSET 是怎么实现的</h2>
+<h2 id="zset">ZSET 是怎么实现的</h2>
 <p>ZSET 中每个元素（member）带一个分数（score），按分数排序。内部同时维护两种结构：<strong>哈希表</strong>用于按 member 查 score（O(1)），<strong>跳表</strong>用于按分数排序和范围查询（O(log N)）。</p>
 <figure>
-  <div class="diagram">
-  <svg class="sk" viewBox="0 0 720 260" role="img" aria-label="跳表与哈希表示意图">
-    <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="fill:var(--muted)"/></marker></defs>
-    <text class="lbl" x="10" y="16">跳表（按 score 从小到大）</text>
-    <!-- head -->
-    <rect class="head" x="10" y="30" width="54" height="150" rx="6"/>
-    <text x="22" y="110">head</text>
-    <!-- nodes: x positions -->
-    <rect class="node" x="120" y="140" width="80" height="40" rx="6"/><text x="128" y="157">post:3</text><text class="lbl" x="128" y="172">score 12</text>
-    <rect class="node" x="240" y="90" width="80" height="90" rx="6"/><text x="248" y="157">post:7</text><text class="lbl" x="248" y="172">score 40</text>
-    <rect class="node" x="360" y="140" width="80" height="40" rx="6"/><text x="368" y="157">post:2</text><text class="lbl" x="368" y="172">score 98</text>
-    <rect class="node" x="480" y="40" width="80" height="140" rx="6"/><text x="488" y="157">post:8</text><text class="lbl" x="488" y="172">score 155</text>
-    <rect class="node" x="600" y="140" width="80" height="40" rx="6"/><text x="608" y="157">post:5</text><text class="lbl" x="608" y="172">score 230</text>
-    <!-- level 0 -->
-    <line class="ln" x1="64" y1="150" x2="118" y2="150"/>
-    <line class="ln" x1="200" y1="150" x2="238" y2="150"/>
-    <line class="ln" x1="320" y1="150" x2="358" y2="150"/>
-    <line class="ln" x1="440" y1="150" x2="478" y2="150"/>
-    <line class="ln" x1="560" y1="150" x2="598" y2="150"/>
-    <!-- level 1 -->
-    <line class="ln hot" x1="64" y1="105" x2="238" y2="105"/>
-    <line class="ln" x1="320" y1="105" x2="478" y2="105"/>
-    <!-- level 2 -->
-    <line class="ln" x1="64" y1="55" x2="478" y2="55"/>
-    <text class="lbl" x="68" y="48">L2</text><text class="lbl" x="68" y="98">L1</text><text class="lbl" x="68" y="143">L0</text>
-    <!-- hash -->
-    <text class="lbl" x="10" y="212">哈希表（member → score）</text>
-    <rect class="hash" x="10" y="220" width="130" height="30" rx="6"/><text x="20" y="240">post:7 → 40</text>
-    <rect class="hash" x="150" y="220" width="140" height="30" rx="6"/><text x="160" y="240">post:8 → 155</text>
-    <rect class="hash" x="300" y="220" width="130" height="30" rx="6"/><text x="310" y="240">post:3 → 12</text>
-    <text class="lbl" x="445" y="232">ZSCORE 查哈希表：O(1)</text><text class="lbl" x="445" y="248">ZRANGE 走跳表：O(log N + M)</text>
-  </svg>
-  </div>
-  <figcaption>图 1　ZSET = 跳表 + 哈希表。高层的链接可以跳过多个节点，所以查找、插入、取排名都是 O(log N)</figcaption>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="ZSET 内部：跳表 + 哈希表">
+  <text class="lbl" x="10" y="18">跳表（按 score 从小到大）</text>
+  <rect class="bx-d" x="10" y="30" width="54" height="150" rx="6"/>
+  <text class="sm mono" x="37" y="110" text-anchor="middle">head</text>
+  <rect class="bx-r" x="120" y="140" width="86" height="40" rx="6"/>
+  <text class="sm mono" x="163" y="157" text-anchor="middle">post:3</text>
+  <text class="sm" x="163" y="172" text-anchor="middle">score 12</text>
+  <rect class="bx-r" x="240" y="90" width="86" height="90" rx="6"/>
+  <text class="sm mono" x="283" y="157" text-anchor="middle">post:7</text>
+  <text class="sm" x="283" y="172" text-anchor="middle">score 40</text>
+  <rect class="bx-r" x="360" y="140" width="86" height="40" rx="6"/>
+  <text class="sm mono" x="403" y="157" text-anchor="middle">post:2</text>
+  <text class="sm" x="403" y="172" text-anchor="middle">score 98</text>
+  <rect class="bx-r" x="480" y="40" width="86" height="140" rx="6"/>
+  <text class="sm mono" x="523" y="157" text-anchor="middle">post:8</text>
+  <text class="sm" x="523" y="172" text-anchor="middle">score 155</text>
+  <rect class="bx-r" x="600" y="140" width="86" height="40" rx="6"/>
+  <text class="sm mono" x="643" y="157" text-anchor="middle">post:5</text>
+  <text class="sm" x="643" y="172" text-anchor="middle">score 230</text>
+  <text class="sm mono" x="70" y="145">L0</text>
+  <text class="sm mono" x="70" y="100">L1</text>
+  <text class="sm mono" x="70" y="50">L2</text>
+  <path class="ln" d="M64 150 L118 150" marker-end="url(#ar)"/>
+  <path class="ln" d="M206 150 L238 150" marker-end="url(#ar)"/>
+  <path class="ln" d="M326 150 L358 150" marker-end="url(#ar)"/>
+  <path class="ln" d="M446 150 L478 150" marker-end="url(#ar)"/>
+  <path class="ln" d="M566 150 L598 150" marker-end="url(#ar)"/>
+  <path class="ln-a" d="M64 105 L238 105" marker-end="url(#ar-a)"/>
+  <path class="ln" d="M326 105 L478 105" marker-end="url(#ar)"/>
+  <path class="ln" d="M64 58 L478 58" marker-end="url(#ar)"/>
+  <text class="sm on-a" x="150" y="84">查找 post:2：先走 L1 跳到 post:7，再降到 L0</text>
+  <text class="lbl" x="10" y="214">哈希表（member → score）</text>
+  <rect class="bx-p" x="10" y="224" width="138" height="34" rx="8"/>
+  <text class="sm mono" x="79" y="245.5" text-anchor="middle">post:7 → 40</text>
+  <rect class="bx-p" x="160" y="224" width="138" height="34" rx="8"/>
+  <text class="sm mono" x="229" y="245.5" text-anchor="middle">post:8 → 155</text>
+  <rect class="bx-p" x="310" y="224" width="138" height="34" rx="8"/>
+  <text class="sm mono" x="379" y="245.5" text-anchor="middle">post:3 → 12</text>
+  <text class="sm" x="470" y="238">ZSCORE 查哈希表：O(1)</text>
+  <text class="sm" x="470" y="256">ZRANGE 走跳表：O(log N + M)</text>
+</svg>
+<figcaption>图 4-1　ZSET = 跳表 + 哈希表。高层的链接可以跳过多个节点，所以查找、插入、取排名都是 O(log N)</figcaption>
 </figure>
-<div class="table-wrap"><table>
+<div class="tw"><table>
   <thead><tr><th>命令</th><th>作用</th><th>复杂度</th><th>本章用途</th></tr></thead>
   <tbody>
     <tr><td><code>ZINCRBY key n member</code></td><td>给 member 的分数加 n，member 不存在时自动创建</td><td>O(log N)</td><td>热度 +1</td></tr>
@@ -105,11 +97,11 @@
   </tbody>
 </table></div>
 
-<h2 id="keys"><span class="num">3</span>Key 设计</h2>
+<h2 id="keys">Key 设计</h2>
 <p>日榜、周榜通过 <strong>按天拆分 Key</strong> 实现：每天一个 ZSET，Key 里带日期。查询某天的数据直接读对应的 Key，过期数据由 TTL 自动清理。</p>
 <div class="keys">
   <div class="rk">
-    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:rank:views:total</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-head"><span class="rt zset">ZSET</span><code>blog:rank:views:total</code><span class="ttl">TTL ∞</span></div>
     <div class="rk-body">
       <div class="row"><span>8</span><span class="score">155</span></div>
       <div class="row"><span>7</span><span class="score">144</span></div>
@@ -117,7 +109,7 @@
     </div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:rank:views:day:20261030</code><span class="ttl">TTL 8d</span></div>
+    <div class="rk-head"><span class="rt zset">ZSET</span><code>blog:rank:views:day:20261030</code><span class="ttl">TTL 8d</span></div>
     <div class="rk-body">
       <div class="row"><span>12</span><span class="score">40</span></div>
       <div class="row"><span>9</span><span class="score">17</span></div>
@@ -125,7 +117,7 @@
     </div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:rank:views:week:20261030</code><span class="ttl">TTL 300s</span></div>
+    <div class="rk-head"><span class="rt zset">ZSET</span><code>blog:rank:views:week:20261030</code><span class="ttl">TTL 300s</span></div>
     <div class="rk-body">
       <div class="row"><span>8</span><span class="score">155</span></div>
       <div class="row"><span>7</span><span class="score">144</span></div>
@@ -135,76 +127,119 @@
   </div>
 </div>
 
-<h3 id="union">3.1 周榜是怎么合并的</h3>
+<h3 id="union">周榜是怎么合并的</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  D0["day:20261030<br/>A:3"] --> U
-  D1["day:20261029<br/>B:2"] --> U
-  D2["day:20261028<br/>（空）"] --> U
-  D6["day:20261024<br/>B:2 · A:1"] --> U
-  D7["day:20261023<br/>A:100"] -.不在 7 天内.-x U
-  U(["ZUNIONSTORE<br/>AGGREGATE SUM"]) --> W["week:20261030<br/>B:4 · A:4"]
-  W --> TTL["EXPIRE 300"]
-  </pre></div>
-  <figcaption>图 2　周榜 = 最近 7 个日榜的并集，分数相加。第 8 天的数据不参与合并</figcaption>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="周榜由 7 个日榜合并">
+  <rect class="bx-r" x="10" y="10" width="200" height="38" rx="8"/>
+  <text class="sm mono" x="110" y="25" text-anchor="middle">day:20261030</text>
+  <text class="sm" x="110" y="42" text-anchor="middle">A:3</text>
+  <path class="ln-r" d="M210 29 L300 110" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="10" y="56" width="200" height="38" rx="8"/>
+  <text class="sm mono" x="110" y="71" text-anchor="middle">day:20261029</text>
+  <text class="sm" x="110" y="88" text-anchor="middle">B:2</text>
+  <path class="ln-r" d="M210 75 L300 110" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="10" y="102" width="200" height="38" rx="8"/>
+  <text class="sm mono" x="110" y="117" text-anchor="middle">day:20261028</text>
+  <text class="sm" x="110" y="134" text-anchor="middle">（空）</text>
+  <path class="ln-r" d="M210 121 L300 110" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="10" y="148" width="200" height="38" rx="8"/>
+  <text class="sm mono" x="110" y="163" text-anchor="middle">day:20261024</text>
+  <text class="sm" x="110" y="180" text-anchor="middle">B:2 · A:1</text>
+  <path class="ln-r" d="M210 167 L300 110" marker-end="url(#ar-r)"/>
+  <rect class="bx-d" x="10" y="192" width="200" height="34" rx="8"/>
+  <text class="sm mono" x="110" y="213.5" text-anchor="middle">day:20261023 · A:100</text>
+  <text class="sm on-r" x="220" y="214">第 8 天，不参与合并</text>
+  <rect class="bx-a" x="302" y="84" width="170" height="56" rx="8"/>
+  <text class="ttl on-a" x="387" y="107.5" text-anchor="middle">ZUNIONSTORE</text>
+  <text class="sm mono" x="387" y="125.5" text-anchor="middle">AGGREGATE SUM</text>
+  <rect class="bx-g" x="520" y="84" width="230" height="56" rx="8"/>
+  <text class="lbl mono" x="635" y="108" text-anchor="middle">week:20261030</text>
+  <text class="sm" x="635" y="125" text-anchor="middle">B:4 · A:4</text>
+  <path class="ln-a" d="M472 112 L518 112" marker-end="url(#ar-a)"/>
+  <rect class="bx" x="560" y="166" width="150" height="36" rx="8"/>
+  <text class="sm mono" x="635" y="188.5" text-anchor="middle">EXPIRE 300</text>
+  <path class="ln" d="M635 140 L635 164" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 4-2　周榜 = 最近 7 个日榜的并集，分数相加。第 8 天的数据不参与合并</figcaption>
 </figure>
-<div class="callout tip">
-  <span class="label">为什么周榜要缓存</span>
+<div class="box tip">
+  <div class="t">&#10003; 为什么周榜要缓存</div>
   <p>ZUNIONSTORE 的复杂度和所有输入集合的元素总数成正比。每个请求都执行一遍没有必要，周榜晚 5 分钟更新完全可以接受，所以把结果写进带 TTL 的 Key，过期后再重新计算。</p>
 </div>
 
-<h2 id="flow"><span class="num">4</span>流程</h2>
+<h2 id="flow">流程</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant V as post_detail
-  participant PV as pageviews
-  participant RK as ranking
-  participant R as Redis
-  V->>PV: record_view(post, visitor)
-  PV-->>V: True（这次浏览被计入）
-  V->>RK: record_view(post.id)
-  RK->>R: MULTI
-  RK->>R: ZINCRBY rank:views:total 1 42
-  RK->>R: ZINCRBY rank:views:day:20261030 1 42
-  RK->>R: EXPIRE rank:views:day:20261030 691200
-  RK->>R: EXEC
-  Note over V,R: ...渲染侧边栏时...
-  V->>RK: top_posts('week', 5)
-  RK->>R: EXISTS rank:views:week:20261030
-  alt 不存在
-    RK->>R: ZUNIONSTORE week:20261030 7 day:… · EXPIRE 300
-  end
-  RK->>R: ZREVRANGE week:20261030 0 9 WITHSCORES
-  RK->>RK: Post.published.in_bulk(ids)<br/>过滤掉已下线的文章
-  </pre></div>
-  <figcaption>图 3　只有通过防刷检查的浏览才会增加热度，所以排行榜不会被刷新页面刷上去</figcaption>
+<svg class="dgm" viewBox="0 0 785.31 584" role="img" aria-label="排行榜的写入与读取">
+  <rect class="grp" x="12" y="374" width="761.31" height="72" rx="6"/>
+  <path class="life" d="M88.07 54 L88.07 578"/>
+  <path class="life" d="M279.79 54 L279.79 578"/>
+  <path class="life" d="M429.79 54 L429.79 578"/>
+  <path class="life" d="M701.31 54 L701.31 578"/>
+  <rect class="bx" x="36" y="14" width="104.14" height="40" rx="8"/>
+  <text class="ttl" x="88.07" y="39" text-anchor="middle">post_detail</text>
+  <rect class="bx-g" x="231.567" y="14" width="96.445" height="40" rx="8"/>
+  <text class="ttl on-g" x="279.79" y="39" text-anchor="middle">pageviews</text>
+  <rect class="bx-a" x="381.79" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-a" x="429.79" y="39" text-anchor="middle">ranking</text>
+  <rect class="bx-r" x="653.31" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="701.31" y="39" text-anchor="middle">Redis</text>
+  <text class="lbl" x="183.93" y="76" text-anchor="middle">record_view(post, visitor)</text>
+  <path class="ln" d="M93.07 82 L273.79 82" marker-end="url(#ar)"/>
+  <text class="lbl" x="183.93" y="110" text-anchor="middle">True（这次浏览被计入）</text>
+  <path class="ln-d" d="M274.79 116 L94.07 116" marker-end="url(#ar)"/>
+  <text class="lbl" x="258.93" y="144" text-anchor="middle">record_view(post.id)</text>
+  <path class="ln" d="M93.07 150 L423.79 150" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="565.55" y="178" text-anchor="middle">MULTI</text>
+  <text class="lbl mono" x="565.55" y="194" text-anchor="middle">ZINCRBY …:total 1 42</text>
+  <text class="lbl mono" x="565.55" y="210" text-anchor="middle">ZINCRBY …:day:20261030 1 42</text>
+  <text class="lbl mono" x="565.55" y="226" text-anchor="middle">EXPIRE …:day:20261030 691200</text>
+  <text class="lbl mono" x="565.55" y="242" text-anchor="middle">EXEC</text>
+  <path class="ln-r" d="M434.79 248 L695.31 248" marker-end="url(#ar-r)"/>
+  <rect class="bx-d" x="68.07" y="268" width="653.24" height="26" rx="6"/>
+  <text class="sm " x="394.69" y="284" text-anchor="middle">……渲染侧边栏时（key 前缀 blog:rank:views 省略为 …）……</text>
+  <text class="lbl" x="258.93" y="318" text-anchor="middle">top_posts(&#x27;week&#x27;, 5)</text>
+  <path class="ln" d="M93.07 324 L423.79 324" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="565.55" y="352" text-anchor="middle">EXISTS …:week:20261030</text>
+  <path class="ln" d="M434.79 358 L695.31 358" marker-end="url(#ar)"/>
+  <rect class="grp-h" x="12" y="374" width="35.78" height="20" rx="4"/>
+  <text class="sm mono" x="29.89" y="388" text-anchor="middle">alt</text>
+  <text class="sm" x="55.78" y="388">不存在</text>
+  <text class="lbl mono" x="565.55" y="412" text-anchor="middle">ZUNIONSTORE …:week:20261030 7 …</text>
+  <text class="lbl mono" x="565.55" y="428" text-anchor="middle">EXPIRE …:week:20261030 300</text>
+  <path class="ln-r" d="M434.79 434 L695.31 434" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="565.55" y="468" text-anchor="middle">ZREVRANGE …:week:20261030 0 9</text>
+  <text class="lbl mono" x="565.55" y="484" text-anchor="middle">WITHSCORES</text>
+  <path class="ln-r" d="M434.79 490 L695.31 490" marker-end="url(#ar-r)"/>
+  <path class="ln" d="M434.79 516 h22 v38 h-16" marker-end="url(#ar)"/>
+  <text class="lbl" x="463.79" y="534">Post.published.in_bulk(ids)</text>
+  <text class="lbl" x="463.79" y="550">过滤掉已下线的文章</text>
+</svg>
+<figcaption>图 4-3　只有通过防刷检查的浏览才会增加热度，所以排行榜不会被刷新页面刷上去</figcaption>
 </figure>
 
-<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
-<pre class="cli"><code><span class="prompt">&gt; </span>ZINCRBY demo:rank 5 post:A
-<span class="out">"5"</span>
-<span class="prompt">&gt; </span>ZINCRBY demo:rank 3 post:B
-<span class="prompt">&gt; </span>ZINCRBY demo:rank 1 post:A
-<span class="out">"6"</span>
-<span class="prompt">&gt; </span>ZREVRANGE demo:rank 0 -1 WITHSCORES
-<span class="out">1) "post:A"
+<h2 id="cli">用 redis-cli 体验</h2>
+<div class="code" data-lang="cli"><pre>&gt; ZINCRBY demo:rank 5 post:A
+"5"
+&gt; ZINCRBY demo:rank 3 post:B
+&gt; ZINCRBY demo:rank 1 post:A
+"6"
+&gt; ZREVRANGE demo:rank 0 -1 WITHSCORES
+1) "post:A"
 2) "6"
 3) "post:B"
-4) "3"</span>
-<span class="prompt">&gt; </span>ZREVRANK demo:rank post:B             <span class="cmt"># 名次从 0 开始</span>
-<span class="out">(integer) 1</span>
-<span class="prompt">&gt; </span>ZADD demo:d1 2 post:A 1 post:C
-<span class="prompt">&gt; </span>ZUNIONSTORE demo:week 2 demo:rank demo:d1
-<span class="out">(integer) 3</span>
-<span class="prompt">&gt; </span>ZREVRANGE demo:week 0 -1 WITHSCORES
-<span class="out">1) "post:A"  2) "8"  3) "post:B"  4) "3"  5) "post:C"  6) "1"</span>
-<span class="prompt">&gt; </span>ZUNIONSTORE demo:max 2 demo:rank demo:d1 AGGREGATE MAX   <span class="cmt"># 也可以取最大值</span></code></pre>
+4) "3"
+&gt; ZREVRANK demo:rank post:B             # 名次从 0 开始
+(integer) 1
+&gt; ZADD demo:d1 2 post:A 1 post:C
+&gt; ZUNIONSTORE demo:week 2 demo:rank demo:d1
+(integer) 3
+&gt; ZREVRANGE demo:week 0 -1 WITHSCORES
+1) "post:A"  2) "8"  3) "post:B"  4) "3"  5) "post:C"  6) "1"
+&gt; ZUNIONSTORE demo:max 2 demo:rank demo:d1 AGGREGATE MAX   # 也可以取最大值</pre></div>
 
-<h2 id="code"><span class="num">6</span>代码实现</h2>
-<h3 id="code-keys">6.1 Key</h3>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-04"># ---------------------------------------------------------------- step-04 排行榜
+<h2 id="code">代码实现</h2>
+<h3 id="code-keys">Key</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><pre data-include="Chapter03/mysite/blog/redis_keys.py::#step-04"># ---------------------------------------------------------------- step-04 排行榜
 def rank_total():
     """ZSET  总榜：member = 文章 ID，score = 浏览次数"""
     return _k('rank', 'views', 'total')
@@ -217,9 +252,9 @@ def rank_daily(day):
 
 def rank_weekly(day):
     """ZSET  截止到 day 的 7 天榜（7 个日榜的并集），缓存 5 分钟"""
-    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))</code></pre>
-<h3 id="code-write">6.2 写入热度</h3>
-<pre data-file="Chapter03/mysite/blog/services/ranking.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/ranking.py::record_view">def record_view(post_id, day=None, amount=1):
+    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))</pre></div>
+<h3 id="code-write">写入热度</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/ranking.py"><pre data-include="Chapter03/mysite/blog/services/ranking.py::record_view">def record_view(post_id, day=None, amount=1):
     """文章热度 +amount：总榜和当天的日榜同时累加。"""
     day = day or timezone.localdate()
     daily = K.rank_daily(day)
@@ -228,9 +263,9 @@ def rank_weekly(day):
     pipe.zincrby(daily, amount, post_id)
     # 每次都刷新过期时间也没关系：日榜最后一次写入后 8 天被删除
     pipe.expire(daily, DAILY_TTL)
-    pipe.execute()</code></pre>
-<h3 id="code-week">6.3 合并周榜</h3>
-<pre data-file="Chapter03/mysite/blog/services/ranking.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/ranking.py::_weekly_key">def _weekly_key(today):
+    pipe.execute()</pre></div>
+<h3 id="code-week">合并周榜</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/ranking.py"><pre data-include="Chapter03/mysite/blog/services/ranking.py::_weekly_key">def _weekly_key(today):
     """把最近 7 天的日榜合并成周榜。结果缓存 5 分钟，避免每次请求都重新合并。"""
     r = get_redis()
     key = K.rank_weekly(today)
@@ -241,9 +276,9 @@ def rank_weekly(day):
         pipe.zunionstore(key, days)
         pipe.expire(key, WEEKLY_CACHE_SECONDS)
         pipe.execute()
-    return key</code></pre>
-<h3 id="code-read">6.4 读取榜单</h3>
-<pre data-file="Chapter03/mysite/blog/services/ranking.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/ranking.py::top_posts">def top_posts(period='total', count=10, today=None):
+    return key</pre></div>
+<h3 id="code-read">读取榜单</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/ranking.py"><pre data-include="Chapter03/mysite/blog/services/ranking.py::top_posts">def top_posts(period='total', count=10, today=None):
     """返回已发布的热门文章列表，每篇文章带上 score 属性。"""
     # 多取一些，防止榜单里有已下线的文章导致数量不够
     pairs = top_ids(period, count * 2, today)
@@ -254,12 +289,12 @@ def rank_weekly(day):
         if post is not None:
             post.score = score
             result.append(post)
-    return result[:count]</code></pre>
+    return result[:count]</pre></div>
 <p><code>in_bulk()</code> 一条 SQL 取出所有文章并返回 <code>{id: post}</code> 字典，再按 Redis 给出的顺序组装列表。<code>Post.published</code> 管理器保证下线的文章不会出现。</p>
 
-<h3 id="code-signal">6.5 文章下线时清理榜单</h3>
+<h3 id="code-signal">文章下线时清理榜单</h3>
 <p>这一章新建了 <code>blog/signals.py</code>，并在 <code>BlogConfig.ready()</code> 中导入。后面的章节都会往这个文件里添加处理函数。</p>
-<pre data-file="Chapter03/mysite/blog/signals.py"><code class="language-python">@receiver(post_save, sender=Post)
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/signals.py"><pre>@receiver(post_save, sender=Post)
 def post_saved(sender, instance, **kwargs):
     if instance.status != Post.Status.PUBLISHED:
         # step-04 下线的文章从排行榜移除
@@ -268,48 +303,48 @@ def post_saved(sender, instance, **kwargs):
 
 @receiver(post_delete, sender=Post)
 def post_deleted(sender, instance, **kwargs):
-    ranking.remove_post(instance.id)</code></pre>
+    ranking.remove_post(instance.id)</pre></div>
 
-<h3 id="code-view">6.6 视图与模板</h3>
-<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-diff">      visitor_id = get_visitor_id(request)
+<h3 id="code-view">视图与模板</h3>
+<div class="code" data-lang="diff" data-file="Chapter03/mysite/blog/views.py"><pre>      visitor_id = get_visitor_id(request)
 -     pageviews.record_view(post, visitor_id)
 +     if pageviews.record_view(post, visitor_id):
 +         # Redis: only counted views raise the post in the rankings
-+         ranking.record_view(post.id)</code></pre>
-<pre data-file="Chapter03/mysite/blog/templatetags/blog_tags.py"><code class="language-python" data-include="Chapter03/mysite/blog/templatetags/blog_tags.py::get_hot_posts">@register.simple_tag
++         ranking.record_view(post.id)</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/templatetags/blog_tags.py"><pre data-include="Chapter03/mysite/blog/templatetags/blog_tags.py::get_hot_posts">@register.simple_tag
 def get_hot_posts(period='week', count=5):
-    return ranking.top_posts(period, count)</code></pre>
+    return ranking.top_posts(period, count)</pre></div>
 
-<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<h2 id="lab">动手实验</h2>
 <ol class="steps">
   <li>
     <p>生成 7 天的模拟浏览数据（只用于演示）：</p>
-<pre class="cli"><code><span class="prompt">$ </span>python manage.py simulate_views --days 7
-<span class="out">Simulated 1036 views over 7 day(s) for 12 posts.</span></code></pre>
+<div class="code" data-lang="cli"><pre>$ python manage.py simulate_views --days 7
+Simulated 1036 views over 7 day(s) for 12 posts.</pre></div>
   </li>
   <li>打开 <code>/blog/ranking/</code>，比较三个榜单的差异。</li>
   <li>
     <p>在 redis-cli 中查看：</p>
-<pre class="cli"><code><span class="prompt">&gt; </span>KEYS blog:rank:*
-<span class="prompt">&gt; </span>TTL blog:rank:views:day:20261030
-<span class="out">(integer) 691187</span>
-<span class="prompt">&gt; </span>TTL blog:rank:views:week:20261030
-<span class="out">(integer) 271</span></code></pre>
+<div class="code" data-lang="cli"><pre>&gt; KEYS blog:rank:*
+&gt; TTL blog:rank:views:day:20261030
+(integer) 691187
+&gt; TTL blog:rank:views:week:20261030
+(integer) 271</pre></div>
   </li>
   <li>在 Admin 中把榜首文章改为 Draft，刷新榜单，它应该不见了。</li>
 </ol>
 
-<h2 id="think"><span class="num">8</span>边界与思考</h2>
-<div class="callout warn">
-  <span class="label">本实现的取舍</span>
+<h2 id="think">边界与思考</h2>
+<div class="box warn">
+  <div class="t">&#9888; 本实现的取舍</div>
   <ul>
     <li><strong>周榜有最多 5 分钟的延迟</strong>：日榜、总榜是实时的。</li>
     <li><strong>分数相同时的排序</strong>：ZSET 中分数相同的元素按 member 的字典序排列，<code>ZREVRANGE</code> 则是字典序倒序。如果希望「先达到这个分数的排在前面」，可以把时间编码进分数，例如 <code>score = 热度 + (1 - 时间戳/1e10)</code>。</li>
     <li><strong>日期按 <code>TIME_ZONE</code> 计算</strong>：项目设置为 UTC，所以「今天」从北京时间 8 点开始算。改成 <code>Asia/Shanghai</code> 即可。</li>
   </ul>
 </div>
-<div class="callout think">
-  <span class="label">思考题</span>
+<div class="exercise">
+  <h3>思考题</h3>
   <ol>
     <li>Hacker News 的排名公式是 <code>(P-1) / (T+2)^1.8</code>，热度会随时间衰减。用 ZSET 怎么实现？（提示：定时任务重算，或者让新的浏览贡献更高的分数）</li>
     <li>如果改成「自然周」（周一到周日），<code>_weekly_key</code> 要怎么改？</li>
@@ -317,12 +352,10 @@ def get_hot_posts(period='week', count=5):
   </ol>
 </div>
 
-<div class="pager">
-  <a href="03-page-views.html"><small>上一篇</small>← step-03 文章浏览量</a>
-  <a class="next" href="05-cache.html"><small>下一篇</small>step-05 缓存 →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="../assets/site.js"></script>
 </body>
 </html>

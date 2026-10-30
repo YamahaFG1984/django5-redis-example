@@ -2,45 +2,38 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>页面与查询缓存</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>页面与查询缓存 — Django × Redis 实战</title>
 <link rel="stylesheet" href="../assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="../assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="../index.html">首页</a>
-    <a href="../01-prd.html">PRD</a>
-    <a href="../02-design.html">设计文档</a>
-    <a href="../index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="05">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">Step 05 · 缓存</div>
-  <h1>页面与查询缓存：Cache-Aside 与三大经典问题</h1>
-  <p class="lead">缓存是 Redis 最常见的用途。这一章用 Django 内置的 RedisCache 缓存文章详情、相似文章和侧边栏，并处理缓存穿透、击穿、雪崩，顺带实现一个分布式锁。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">Step 05 · 缓存</span>
+<h1>页面与查询缓存：Cache-Aside 与三大经典问题</h1>
+<p class="lede">缓存是 Redis 最常见的用途。这一章用 Django 内置的 RedisCache 缓存文章详情、相似文章和侧边栏，并处理缓存穿透、击穿、雪崩，顺带实现一个分布式锁。</p>
+<div class="meta">
     <span class="pill tag">git checkout step-05-cache</span>
-    <span class="t string">STRING</span><span class="t lua">LUA</span>
-  </div>
-</section>
+    <span class="rt string">STRING</span><span class="rt lua">LUA</span>
+</div>
 
-<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>掌握 Cache-Aside 的读写流程，以及为什么写时要删除缓存</li>
+    <li>解决缓存穿透、击穿、雪崩</li>
+    <li>实现一个正确的分布式锁（随机 token + Lua 释放）</li>
+    <li>用命名空间版本号批量让缓存失效</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">场景分析</h2>
 <p>在没有缓存的情况下，打开一篇文章要执行的 SQL：</p>
-<div class="table-wrap"><table>
+<div class="tw"><table>
   <thead><tr><th>来源</th><th>查询</th><th>特点</th><th>本章策略</th></tr></thead>
   <tbody>
     <tr><td>详情视图</td><td>按日期 + slug 查文章</td><td>热点文章读多写少</td><td>缓存 5 分钟，修改时删除</td></tr>
@@ -52,43 +45,74 @@
   </tbody>
 </table></div>
 
-<h2 id="pattern"><span class="num">2</span>Cache-Aside 模式</h2>
+<h2 id="pattern">Cache-Aside 模式</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  subgraph READ["读"]
-    direction TB
-    R1["读缓存"] --> H{"命中？"}
-    H -->|是| RET["返回"]
-    H -->|否| DB1["查数据库"] --> W["写入缓存（带 TTL）"] --> RET
-  end
-  subgraph WRITE["写"]
-    direction TB
-    U["更新数据库"] --> D["删除缓存"]
-  end
-  </pre></div>
-  <figcaption>图 1　Cache-Aside：读时按需加载，写时删除缓存。应用代码自己负责维护缓存</figcaption>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Cache-Aside 读写流程">
+  <rect class="bx-b" x="10" y="10" width="470" height="230" rx="10"/>
+  <text class="ttl on-b" x="26" y="34">读</text>
+  <rect class="bx" x="30" y="50" width="120" height="40" rx="8"/>
+  <text class="lbl" x="90" y="74.5" text-anchor="middle">读缓存</text>
+  <rect class="bx-y" x="190" y="50" width="100" height="40" rx="8"/>
+  <text class="ttl on-y" x="240" y="74" text-anchor="middle">命中？</text>
+  <rect class="bx-g" x="340" y="50" width="120" height="40" rx="8"/>
+  <text class="lbl" x="400" y="74.5" text-anchor="middle">返回</text>
+  <rect class="bx" x="190" y="130" width="100" height="40" rx="8"/>
+  <text class="lbl" x="240" y="154.5" text-anchor="middle">查数据库</text>
+  <rect class="bx" x="330" y="130" width="140" height="40" rx="8"/>
+  <text class="sm" x="400" y="154.5" text-anchor="middle">写入缓存（带 TTL）</text>
+  <path class="ln" d="M150 70 L188 70" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M290 70 L338 70" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="314" y="64" text-anchor="middle">是</text>
+  <path class="ln" d="M240 90 L240 128" marker-end="url(#ar)"/>
+  <text class="sm" x="248" y="114">否</text>
+  <path class="ln" d="M290 150 L328 150" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M400 130 L400 92" marker-end="url(#ar-g)"/>
+  <text class="sm" x="30" y="214">应用代码自己决定什么时候读、什么时候填</text>
+  <rect class="bx-a" x="500" y="10" width="250" height="230" rx="10"/>
+  <text class="ttl on-a" x="516" y="34">写</text>
+  <rect class="bx" x="530" y="60" width="190" height="44" rx="8"/>
+  <text class="ttl" x="625" y="86" text-anchor="middle">① 更新数据库</text>
+  <rect class="bx-r" x="530" y="140" width="190" height="44" rx="8"/>
+  <text class="ttl on-r" x="625" y="157.5" text-anchor="middle">② 删除缓存</text>
+  <text class="sm" x="625" y="175.5" text-anchor="middle">不是更新缓存</text>
+  <path class="ln-a" d="M625 104 L625 138" marker-end="url(#ar-a)"/>
+  <text class="sm" x="516" y="214">下次读取时自然会重新加载</text>
+</svg>
+<figcaption>图 5-1　Cache-Aside：读时按需加载，写时删除缓存。应用代码自己负责维护缓存</figcaption>
 </figure>
 
-<h3 id="why-delete">2.1 为什么是「删除缓存」而不是「更新缓存」</h3>
+<h3 id="why-delete">为什么是「删除缓存」而不是「更新缓存」</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant A as 请求 A（改标题为 X）
-  participant B as 请求 B（改标题为 Y）
-  participant DB as 数据库
-  participant C as 缓存
-  A->>DB: UPDATE title = X
-  B->>DB: UPDATE title = Y
-  B->>C: SET title = Y
-  A->>C: SET title = X（A 的网络慢了一点）
-  Note over DB,C: DB = Y，缓存 = X ❌
-  </pre></div>
-  <figcaption>图 2　「更新缓存」在并发写时可能留下旧值。「删除缓存」不管谁后执行，结果都是缓存为空，下次读取时重新加载</figcaption>
+<svg class="dgm" viewBox="0 0 760 278" role="img" aria-label="更新缓存在并发写时的问题">
+  <path class="life" d="M106.97 54 L106.97 272"/>
+  <path class="life" d="M301.033 54 L301.033 272"/>
+  <path class="life" d="M489.877 54 L489.877 272"/>
+  <path class="life" d="M676 54 L676 272"/>
+  <rect class="bx" x="36" y="14" width="141.94" height="40" rx="8"/>
+  <text class="ttl" x="106.97" y="39" text-anchor="middle">请求 A（改为 X）</text>
+  <rect class="bx" x="230.063" y="14" width="141.94" height="40" rx="8"/>
+  <text class="ttl" x="301.033" y="39" text-anchor="middle">请求 B（改为 Y）</text>
+  <rect class="bx-b" x="441.877" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-b" x="489.877" y="39" text-anchor="middle">数据库</text>
+  <rect class="bx-r" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="676" y="39" text-anchor="middle">缓存</text>
+  <text class="lbl mono" x="298.423" y="76" text-anchor="middle">UPDATE title = X</text>
+  <path class="ln" d="M111.97 82 L483.877 82" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="395.455" y="110" text-anchor="middle">UPDATE title = Y</text>
+  <path class="ln" d="M306.033 116 L483.877 116" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="488.517" y="144" text-anchor="middle">SET title = Y</text>
+  <path class="ln-r" d="M306.033 150 L670 150" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="391.485" y="178" text-anchor="middle">SET title = X（A 的网络慢了一点）</text>
+  <path class="ln-r" d="M111.97 184 L670 184" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="469.877" y="204" width="226.123" height="42" rx="6"/>
+  <text class="sm on-r" x="582.938" y="220" text-anchor="middle">数据库是 Y，缓存是 X</text>
+  <text class="sm on-r" x="582.938" y="236" text-anchor="middle">一直不一致，直到过期</text>
+</svg>
+<figcaption>图 5-2　「更新缓存」在并发写时可能留下旧值。「删除缓存」不管谁后执行，结果都是缓存为空，下次读取时重新加载</figcaption>
 </figure>
 
-<h2 id="problems"><span class="num">3</span>三大经典问题</h2>
-<div class="table-wrap"><table>
+<h2 id="problems">三大经典问题</h2>
+<div class="tw"><table>
   <thead><tr><th>问题</th><th>现象</th><th>对策</th><th>代码位置</th></tr></thead>
   <tbody>
     <tr><td><strong>穿透</strong> Penetration</td><td>请求的数据根本不存在（比如有人遍历随机 URL），缓存永远不会命中，每次都查数据库</td><td>把「不存在」也缓存起来：存一个 <code>MISSING</code> 标记，TTL 60 秒</td><td><code>get_or_load</code> 中 <code>value is None</code> 分支</td></tr>
@@ -97,68 +121,122 @@ sequenceDiagram
   </tbody>
 </table></div>
 
-<h3 id="breakdown">3.1 击穿：分布式锁</h3>
+<h3 id="breakdown">击穿：分布式锁</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant A as 请求 A
-  participant B as 请求 B（及其他 N 个）
-  participant C as 缓存 db1
-  participant L as 锁 db0
-  participant DB as PostgreSQL
-  A->>C: GET post:detail:…
-  B->>C: GET post:detail:…
-  C-->>A: 未命中
-  C-->>B: 未命中
-  A->>L: SET blog:lock:cache:… token-A NX PX 10000
-  L-->>A: OK 抢到锁
-  B->>L: SET blog:lock:cache:… token-B NX PX 10000
-  L-->>B: nil 没抢到
-  A->>C: GET（双重检查，仍未命中）
-  A->>DB: SELECT …
-  A->>C: SET post:detail:… EX 300~360
-  A->>L: EVAL 释放锁（比较 token 后 DEL）
-  loop 每 50ms，最多 2 秒
-    B->>C: GET post:detail:…
-  end
-  C-->>B: 命中 ✓（数据库只被查询了 1 次）
-  </pre></div>
-  <figcaption>图 3　并发未命中时，只有抢到锁的请求查询数据库</figcaption>
+<svg class="dgm" viewBox="0 0 814.66 566" role="img" aria-label="分布式锁防止缓存击穿">
+  <rect class="grp" x="12" y="446" width="790.66" height="56" rx="6"/>
+  <path class="life" d="M84 54 L84 560"/>
+  <path class="life" d="M234 54 L234 560"/>
+  <path class="life" d="M424.16 54 L424.16 560"/>
+  <path class="life" d="M574.16 54 L574.16 560"/>
+  <path class="life" d="M724.16 54 L724.16 560"/>
+  <rect class="bx" x="36" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="84" y="39" text-anchor="middle">请求 A</text>
+  <rect class="bx" x="186" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="234" y="39" text-anchor="middle">请求 B 等</text>
+  <rect class="bx-r" x="376.16" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="424.16" y="39" text-anchor="middle">缓存 db1</text>
+  <rect class="bx-y" x="526.16" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-y" x="574.16" y="39" text-anchor="middle">锁 db0</text>
+  <rect class="bx-b" x="669.66" y="14" width="109" height="40" rx="8"/>
+  <text class="ttl on-b" x="724.16" y="39" text-anchor="middle">PostgreSQL</text>
+  <text class="lbl mono" x="254.08" y="76" text-anchor="middle">GET post:detail:…</text>
+  <path class="ln" d="M89 82 L418.16 82" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="329.08" y="110" text-anchor="middle">GET post:detail:…</text>
+  <path class="ln" d="M239 116 L418.16 116" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="388.16" y="136" width="72" height="26" rx="6"/>
+  <text class="sm " x="424.16" y="152" text-anchor="middle">都未命中</text>
+  <text class="lbl mono" x="329.08" y="186" text-anchor="middle">SET lock token-A NX PX 10000</text>
+  <path class="ln-y" d="M89 192 L568.16 192" marker-end="url(#ar-y)"/>
+  <text class="lbl" x="329.08" y="220" text-anchor="middle">OK 抢到锁</text>
+  <path class="ln-d" d="M569.16 226 L90 226" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="404.08" y="254" text-anchor="middle">SET lock token-B NX PX 10000</text>
+  <path class="ln-y" d="M239 260 L568.16 260" marker-end="url(#ar-y)"/>
+  <text class="lbl" x="404.08" y="288" text-anchor="middle">nil 没抢到</text>
+  <path class="ln-d" d="M569.16 294 L240 294" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="254.08" y="322" text-anchor="middle">GET（双重检查，仍未命中）</text>
+  <path class="ln" d="M89 328 L418.16 328" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="404.08" y="356" text-anchor="middle">SELECT …</text>
+  <path class="ln-b" d="M89 362 L718.16 362" marker-end="url(#ar-b)"/>
+  <text class="lbl mono" x="254.08" y="390" text-anchor="middle">SET post:detail:… EX 300~360</text>
+  <path class="ln-r" d="M89 396 L418.16 396" marker-end="url(#ar-r)"/>
+  <text class="lbl mono" x="329.08" y="424" text-anchor="middle">EVAL 释放锁（比较 token 后 DEL）</text>
+  <path class="ln-y" d="M89 430 L568.16 430" marker-end="url(#ar-y)"/>
+  <rect class="grp-h" x="12" y="446" width="43.04" height="20" rx="4"/>
+  <text class="sm mono" x="33.52" y="460" text-anchor="middle">loop</text>
+  <text class="sm" x="63.04" y="460">每 50ms 一次，最多 2 秒</text>
+  <text class="lbl mono" x="329.08" y="484" text-anchor="middle">GET post:detail:…</text>
+  <path class="ln" d="M239 490 L418.16 490" marker-end="url(#ar)"/>
+  <text class="lbl" x="329.08" y="524" text-anchor="middle">命中：数据库只被查询了 1 次</text>
+  <path class="ln-g" d="M419.16 530 L240 530" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 5-3　并发未命中时，只有抢到锁的请求查询数据库</figcaption>
 </figure>
 
-<h3 id="avalanche">3.2 雪崩：随机抖动</h3>
+<h3 id="avalanche">雪崩：随机抖动</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-gantt
-  dateFormat ss
-  axisFormat %Ss
-  title 1000 个 Key 在 00 秒同时写入
-  section 固定 TTL 30s
-  全部在 30s 同时过期 :crit, 00, 30s
-  section TTL 30s + 0~20% 抖动
-  第 30~36s 陆续过期 :active, 00, 36s
-  </pre></div>
-  <figcaption>图 4　有了抖动，过期时刻分散在一个时间段里，回源压力被摊开</figcaption>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="固定 TTL 与随机抖动">
+  <text class="ttl" x="10" y="30">固定 TTL 30s</text>
+  <text class="ttl" x="10" y="112">TTL 30s + 0~20%</text>
+  <path class="ln" d="M160 170 L740 170"/>
+  <path class="ln" d="M160 166 L160 174"/>
+  <text class="sm" x="160" y="190" text-anchor="middle">0s</text>
+  <path class="ln" d="M232.5 166 L232.5 174"/>
+  <text class="sm" x="232.5" y="190" text-anchor="middle">5s</text>
+  <path class="ln" d="M305 166 L305 174"/>
+  <text class="sm" x="305" y="190" text-anchor="middle">10s</text>
+  <path class="ln" d="M377.5 166 L377.5 174"/>
+  <text class="sm" x="377.5" y="190" text-anchor="middle">15s</text>
+  <path class="ln" d="M450 166 L450 174"/>
+  <text class="sm" x="450" y="190" text-anchor="middle">20s</text>
+  <path class="ln" d="M522.5 166 L522.5 174"/>
+  <text class="sm" x="522.5" y="190" text-anchor="middle">25s</text>
+  <path class="ln" d="M595 166 L595 174"/>
+  <text class="sm" x="595" y="190" text-anchor="middle">30s</text>
+  <path class="ln" d="M667.5 166 L667.5 174"/>
+  <text class="sm" x="667.5" y="190" text-anchor="middle">35s</text>
+  <path class="ln" d="M740 166 L740 174"/>
+  <text class="sm" x="740" y="190" text-anchor="middle">40s</text>
+  <rect class="bx" x="160" y="16" width="435" height="22" rx="4"/>
+  <rect class="bx-r" x="591" y="10" width="8" height="34" rx="2"/>
+  <text class="sm on-r" x="599" y="62" text-anchor="end">1000 个 Key 在同一时刻过期 → 同时回源</text>
+  <rect class="bx" x="160" y="98" width="435" height="22" rx="4"/>
+  <rect class="bx-g" x="595" y="98" width="87" height="22" rx="4"/>
+  <text class="sm on-g" x="638.5" y="140" text-anchor="middle">30~36s 之间陆续过期</text>
+</svg>
+<figcaption>图 5-4　有了抖动，过期时刻分散在一个时间段里，回源压力被摊开</figcaption>
 </figure>
 
-<h2 id="lock"><span class="num">4</span>分布式锁的细节</h2>
+<h2 id="lock">分布式锁的细节</h2>
 <p>加锁很简单：<code>SET key token NX PX 10000</code>。容易出错的是释放锁：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant A as 请求 A
-  participant R as Redis
-  participant B as 请求 B
-  A->>R: SET lock A NX PX 10000 → OK
-  Note over A: 执行很慢，超过了 10 秒……
-  R->>R: 锁过期，自动删除
-  B->>R: SET lock B NX PX 10000 → OK
-  A->>R: DEL lock ❌ 把 B 的锁删了
-  Note over A,B: 正确做法：GET 的值等于自己的 token 才 DEL<br/>而且 GET 和 DEL 必须是一个原子操作 → Lua
-  </pre></div>
-  <figcaption>图 5　为什么要用随机 token，以及为什么释放锁要用 Lua 脚本</figcaption>
+<svg class="dgm" viewBox="0 0 760 328" role="img" aria-label="为什么释放锁要比较 token">
+  <path class="life" d="M84 54 L84 322"/>
+  <path class="life" d="M380 54 L380 322"/>
+  <path class="life" d="M676 54 L676 322"/>
+  <rect class="bx" x="36" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="84" y="39" text-anchor="middle">请求 A</text>
+  <rect class="bx-r" x="332" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="380" y="39" text-anchor="middle">Redis</text>
+  <rect class="bx" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="676" y="39" text-anchor="middle">请求 B</text>
+  <text class="lbl mono" x="232" y="76" text-anchor="middle">SET lock A NX PX 10000 → OK</text>
+  <path class="ln-y" d="M89 82 L374 82" marker-end="url(#ar-y)"/>
+  <path class="ln" d="M89 108 h22 v22 h-16" marker-end="url(#ar)"/>
+  <text class="lbl" x="118" y="118">执行很慢，超过了 10 秒……</text>
+  <path class="ln" d="M385 150 h22 v22 h-16" marker-end="url(#ar)"/>
+  <text class="lbl" x="414" y="160">锁过期，自动删除</text>
+  <text class="lbl mono" x="528" y="194" text-anchor="middle">SET lock B NX PX 10000 → OK</text>
+  <path class="ln-y" d="M671 200 L386 200" marker-end="url(#ar-y)"/>
+  <text class="lbl mono" x="232" y="228" text-anchor="middle">DEL lock ✗ 删掉的是 B 的锁</text>
+  <path class="ln-r" d="M89 234 L374 234" marker-end="url(#ar-r)"/>
+  <rect class="bx-g" x="64" y="254" width="632" height="42" rx="6"/>
+  <text class="sm on-g" x="380" y="270" text-anchor="middle">正确做法：值等于自己的 token 才 DEL</text>
+  <text class="sm on-g mono" x="380" y="286" text-anchor="middle">GET 和 DEL 必须是一个原子操作 → Lua</text>
+</svg>
+<figcaption>图 5-5　为什么要用随机 token，以及为什么释放锁要用 Lua 脚本</figcaption>
 </figure>
-<pre data-file="Chapter03/mysite/blog/services/cache.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/cache.py::RedisLock">class RedisLock:
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/cache.py"><pre data-include="Chapter03/mysite/blog/services/cache.py::RedisLock">class RedisLock:
     """最简单的分布式锁：SET key token NX PX timeout"""
 
     def __init__(self, name, timeout=10):
@@ -173,64 +251,82 @@ sequenceDiagram
         )
 
     def release(self):
-        return get_redis().eval(RELEASE_LOCK_SCRIPT, 1, self.key, self.token) == 1</code></pre>
-<pre data-file="释放锁的 Lua 脚本（RELEASE_LOCK_SCRIPT）"><code class="language-lua">if redis.call('GET', KEYS[1]) == ARGV[1] then
+        return get_redis().eval(RELEASE_LOCK_SCRIPT, 1, self.key, self.token) == 1</pre></div>
+<div class="code" data-lang="lua" data-file="释放锁的 Lua 脚本（RELEASE_LOCK_SCRIPT）"><pre>if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
 end
-return 0</code></pre>
-<div class="callout info">
-  <span class="label">Lua 脚本为什么是原子的</span>
+return 0</pre></div>
+<div class="box note">
+  <div class="t">&#9432; Lua 脚本为什么是原子的</div>
   <p>Redis 用单线程执行命令。一个 Lua 脚本在执行期间，其他客户端的命令都要等待，所以脚本内部的 GET 和 DEL 之间不会插入别的命令。redis-py 自带的 <code>r.lock()</code> 也是这样实现的。这里手写一遍是为了看清原理。</p>
 </div>
 
-<h2 id="keys"><span class="num">5</span>Key 设计</h2>
+<h2 id="keys">Key 设计</h2>
 <p>缓存数据由 Django 缓存框架管理，存放在 <strong>db1</strong>。框架会给每个 Key 加上 <code>{KEY_PREFIX}:{VERSION}:</code> 前缀，值用 pickle 序列化。</p>
 <div class="keys">
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>cache:1:post:detail:2026-10-29:hello-redis</code><span class="ttl">300~360s</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>cache:1:post:detail:2026-10-29:hello-redis</code><span class="ttl">300~360s</span></div>
     <div class="rk-body">&lt;pickle: Post 对象&gt;</div>
     <div class="rk-note">db1。文章不存在时值为 "__missing__"，TTL 60s。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>cache:1:post:42:similar</code><span class="ttl">600~720s</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>cache:1:post:42:similar</code><span class="ttl">600~720s</span></div>
     <div class="rk-body">&lt;pickle: [Post, Post, …]&gt;</div>
     <div class="rk-note">db1。只靠 TTL 过期。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>cache:1:sidebar:ns</code><span class="ttl">∞</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>cache:1:sidebar:ns</code><span class="ttl">∞</span></div>
     <div class="rk-body"><span class="val">7</span></div>
     <div class="rk-note">db1。命名空间版本号。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>cache:1:sidebar:7:latest:3</code><span class="ttl">600~720s</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>cache:1:sidebar:7:latest:3</code><span class="ttl">600~720s</span></div>
     <div class="rk-body">&lt;pickle: [Post×3]&gt;</div>
     <div class="rk-note">db1。版本号变为 8 之后就不会再被读取，等 TTL 到期自动删除。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>blog:lock:cache:post:detail:…</code><span class="ttl">PX 10000</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>blog:lock:cache:post:detail:…</code><span class="ttl">PX 10000</span></div>
     <div class="rk-body">"9f2c…e1"（token）</div>
     <div class="rk-note">db0。分布式锁。</div>
   </div>
 </div>
 
-<h3 id="ns">5.1 命名空间版本号：一次让一批缓存失效</h3>
+<h3 id="ns">命名空间版本号：一次让一批缓存失效</h3>
 <p>侧边栏有多个缓存 Key（文章数、最新 N 篇、评论最多 N 篇，N 还可能不同）。任何一篇文章或评论变化时，它们都要失效。逐个删除需要知道所有 Key 名，比较麻烦，所以把版本号放进 Key 里：</p>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  NS["sidebar:ns = 7"] --> K1["sidebar:7:total_posts"]
-  NS --> K2["sidebar:7:latest:3"]
-  NS --> K3["sidebar:7:most_commented:5"]
-  EVT["新评论 / 文章变化"] -->|INCR| NS2["sidebar:ns = 8"]
-  NS2 --> N1["sidebar:8:total_posts（未命中，重新加载）"]
-  K1 -.不再被读取，TTL 到期自动删除.-> GONE["🗑"]
-  </pre></div>
-  <figcaption>图 6　INCR 一次版本号，所有旧 Key 就不会再被读到</figcaption>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="命名空间版本号">
+  <rect class="bx-a" x="10" y="20" width="170" height="44" rx="8"/>
+  <text class="lbl mono" x="95" y="46.5" text-anchor="middle">sidebar:ns = 7</text>
+  <rect class="bx" x="230" y="10" width="230" height="28" rx="8"/>
+  <text class="sm mono" x="345" y="28.5" text-anchor="middle">sidebar:7:total_posts</text>
+  <path class="ln" d="M180 42 L205 42 L205 24 L228 24" marker-end="url(#ar)"/>
+  <rect class="bx" x="230" y="44" width="230" height="28" rx="8"/>
+  <text class="sm mono" x="345" y="62.5" text-anchor="middle">sidebar:7:latest:3</text>
+  <path class="ln" d="M180 42 L205 42 L205 58 L228 58" marker-end="url(#ar)"/>
+  <rect class="bx" x="230" y="78" width="230" height="28" rx="8"/>
+  <text class="sm mono" x="345" y="96.5" text-anchor="middle">sidebar:7:most_commented:5</text>
+  <path class="ln" d="M180 42 L205 42 L205 92 L228 92" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="10" y="140" width="170" height="44" rx="8"/>
+  <text class="ttl on-r" x="95" y="166" text-anchor="middle">新评论 / 文章变化</text>
+  <rect class="bx-a" x="230" y="140" width="170" height="44" rx="8"/>
+  <text class="lbl mono" x="315" y="166.5" text-anchor="middle">sidebar:ns = 8</text>
+  <path class="ln-r" d="M180 162 L228 162" marker-end="url(#ar-r)"/>
+  <text class="sm mono" x="204" y="156" text-anchor="middle">INCR</text>
+  <rect class="bx-g" x="450" y="140" width="300" height="44" rx="8"/>
+  <text class="sm mono" x="600" y="158" text-anchor="middle">sidebar:8:total_posts</text>
+  <text class="sm" x="600" y="175" text-anchor="middle">未命中 → 重新加载</text>
+  <path class="ln-g" d="M400 162 L448 162" marker-end="url(#ar-g)"/>
+  <rect class="bx-d" x="510" y="30" width="240" height="50" rx="8"/>
+  <text class="sm" x="630" y="51" text-anchor="middle">旧 Key 不会再被读取</text>
+  <text class="sm" x="630" y="68" text-anchor="middle">等 TTL 到期自动删除</text>
+  <path class="ln-d" d="M460 55 H508" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 5-6　INCR 一次版本号，所有旧 Key 就不会再被读到</figcaption>
 </figure>
 
-<h2 id="code"><span class="num">6</span>代码实现</h2>
-<h3 id="code-settings">6.1 配置 Django 缓存</h3>
-<pre data-file="Chapter03/mysite/mysite/settings.py"><code class="language-python">CACHES = {
+<h2 id="code">代码实现</h2>
+<h3 id="code-settings">配置 Django 缓存</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/mysite/settings.py"><pre>CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.redis.RedisCache',
         'LOCATION': config(
@@ -241,10 +337,10 @@ flowchart LR
         'KEY_PREFIX': 'cache',
         'TIMEOUT': 300,
     }
-}</code></pre>
+}</pre></div>
 
-<h3 id="code-core">6.2 核心：<code>get_or_load</code></h3>
-<pre data-file="Chapter03/mysite/blog/services/cache.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/cache.py::get_or_load">def get_or_load(key, loader, timeout=300, lock_wait=2.0):
+<h3 id="code-core">核心：<code>get_or_load</code></h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/cache.py"><pre data-include="Chapter03/mysite/blog/services/cache.py::get_or_load">def get_or_load(key, loader, timeout=300, lock_wait=2.0):
     """
     读缓存；未命中时调用 loader() 从数据库加载并写回缓存。
     loader 返回 None 表示数据不存在。
@@ -277,29 +373,64 @@ flowchart LR
         if value is not None:
             return _unwrap(value)
     # 等太久了（持锁的请求可能出错了），直接查数据库兜底，不写缓存
-    return loader()</code></pre>
+    return loader()</pre></div>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart TD
-  S(["get_or_load(key, loader)"]) --> G{"cache.get(key)"}
-  G -->|有值| UW["MISSING → None<br/>其他 → 原值"] --> E(["返回"])
-  G -->|None| L{"抢锁成功？"}
-  L -->|是| G2{"再读一次缓存<br/>（双重检查）"}
-  G2 -->|有值| UW
-  G2 -->|None| LD["loader() 查数据库"]
-  LD --> N{"结果是 None？"}
-  N -->|是| SM["SET MISSING EX 60<br/>防穿透"] --> RL
-  N -->|否| SV["SET value EX 300×(1~1.2)<br/>防雪崩"] --> RL
-  RL["释放锁（Lua）"] --> E
-  L -->|否| W["每 50ms 读一次缓存<br/>最多等 2 秒"]
-  W -->|读到了| UW
-  W -->|超时| FB["直接 loader() 兜底<br/>不写缓存"] --> E
-  </pre></div>
-  <figcaption>图 7　<code>get_or_load</code> 的完整流程</figcaption>
+<svg class="dgm" viewBox="0 0 760 420" role="img" aria-label="get_or_load 的完整流程">
+  <rect class="bx" x="270" y="6" width="220" height="36" rx="8"/>
+  <text class="sm mono" x="380" y="28.5" text-anchor="middle">get_or_load(key, loader)</text>
+  <rect class="bx-y" x="290" y="64" width="180" height="40" rx="8"/>
+  <text class="lbl mono" x="380" y="88.5" text-anchor="middle">cache.get(key)</text>
+  <path class="ln" d="M380 42 L380 62" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="560" y="64" width="190" height="40" rx="8"/>
+  <text class="sm" x="655" y="88.5" text-anchor="middle">MISSING → None，否则原值</text>
+  <path class="ln-g" d="M470 84 L558 84" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="514" y="78" text-anchor="middle">有值</text>
+  <rect class="bx-y" x="290" y="130" width="180" height="40" rx="8"/>
+  <text class="ttl on-y" x="380" y="154" text-anchor="middle">抢锁成功？</text>
+  <path class="ln" d="M380 104 L380 128" marker-end="url(#ar)"/>
+  <text class="sm mono" x="388" y="120">None</text>
+  <rect class="bx-y" x="290" y="196" width="180" height="40" rx="8"/>
+  <text class="lbl" x="380" y="212" text-anchor="middle">再读一次缓存</text>
+  <text class="sm" x="380" y="229" text-anchor="middle">双重检查</text>
+  <path class="ln" d="M380 170 L380 194" marker-end="url(#ar)"/>
+  <text class="sm" x="388" y="186">是</text>
+  <path class="ln-g" d="M470 216 H655 V106" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="560" y="210" text-anchor="middle">有值</text>
+  <rect class="bx-b" x="290" y="262" width="180" height="40" rx="8"/>
+  <text class="lbl" x="380" y="286.5" text-anchor="middle">loader() 查数据库</text>
+  <path class="ln" d="M380 236 L380 260" marker-end="url(#ar)"/>
+  <text class="sm mono" x="388" y="252">None</text>
+  <rect class="bx-r" x="160" y="328" width="200" height="44" rx="8"/>
+  <text class="sm mono" x="260" y="346" text-anchor="middle">SET MISSING EX 60</text>
+  <text class="sm" x="260" y="363" text-anchor="middle">防穿透</text>
+  <rect class="bx-g" x="400" y="328" width="220" height="44" rx="8"/>
+  <text class="sm mono" x="510" y="346" text-anchor="middle">SET value EX 300×(1~1.2)</text>
+  <text class="sm" x="510" y="363" text-anchor="middle">防雪崩</text>
+  <path class="ln" d="M350 302 L300 326" marker-end="url(#ar)"/>
+  <text class="sm" x="296" y="316" text-anchor="end">结果是 None</text>
+  <path class="ln" d="M410 302 L470 326" marker-end="url(#ar)"/>
+  <text class="sm" x="476" y="316">有结果</text>
+  <rect class="bx" x="290" y="384" width="180" height="32" rx="8"/>
+  <text class="sm" x="380" y="404.5" text-anchor="middle">释放锁（Lua）→ 返回</text>
+  <path class="ln" d="M260 372 L300 382" marker-end="url(#ar)"/>
+  <path class="ln" d="M510 372 L460 382" marker-end="url(#ar)"/>
+  <rect class="bx" x="10" y="120" width="200" height="60" rx="8"/>
+  <text class="sm" x="110" y="146" text-anchor="middle">每 50ms 读一次缓存</text>
+  <text class="sm" x="110" y="163" text-anchor="middle">最多等 2 秒</text>
+  <path class="ln" d="M290 150 L212 150" marker-end="url(#ar)"/>
+  <text class="sm" x="252" y="144" text-anchor="middle">否</text>
+  <path class="ln-g" d="M110 120 V84 H288" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="120" y="100">读到了</text>
+  <rect class="bx-d" x="10" y="220" width="200" height="50" rx="8"/>
+  <text class="sm" x="110" y="241" text-anchor="middle">超时：直接 loader() 兜底</text>
+  <text class="sm" x="110" y="258" text-anchor="middle">不写缓存</text>
+  <path class="ln-d" d="M110 180 L110 218" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 5-7　<code>get_or_load</code> 的完整流程</figcaption>
 </figure>
 
-<h3 id="code-biz">6.3 业务缓存</h3>
-<pre data-file="Chapter03/mysite/blog/services/cache.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/cache.py::get_published_post">def get_published_post(year, month, day, slug):
+<h3 id="code-biz">业务缓存</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/cache.py"><pre data-include="Chapter03/mysite/blog/services/cache.py::get_published_post">def get_published_post(year, month, day, slug):
     from ..models import Post
 
     return get_or_load(
@@ -310,15 +441,15 @@ flowchart TD
             publish__month=month,
             publish__day=day,
         ).first(),
-    )</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/cache.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/cache.py::sidebar">def sidebar(name, loader, timeout=600):
+    )</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/cache.py"><pre data-include="Chapter03/mysite/blog/services/cache.py::sidebar">def sidebar(name, loader, timeout=600):
     """
     侧边栏数据缓存。查询都很便宜，不需要锁，直接用 cache.get_or_set。
     key 中带命名空间版本号，invalidate_sidebar() 把版本号加 1，旧 key 就再也不会被读到。
     """
     ns = cache.get_or_set(K.cache_sidebar_ns(), 1, timeout=None)
-    return cache.get_or_set(K.cache_sidebar(ns, name), loader, jitter(timeout))</code></pre>
-<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-diff">  def post_detail(request, year, month, day, post):
+    return cache.get_or_set(K.cache_sidebar(ns, name), loader, jitter(timeout))</pre></div>
+<div class="code" data-lang="diff" data-file="Chapter03/mysite/blog/views.py"><pre>  def post_detail(request, year, month, day, post):
 -     post = get_object_or_404(Post, status=Post.Status.PUBLISHED, slug=post, ...)
 +     # Redis: cache-aside lookup (also caches "not found")
 +     post = cache_service.get_published_post(year, month, day, post)
@@ -331,52 +462,52 @@ flowchart TD
 +         redis_keys.cache_post_similar(post.id),
 +         lambda: list(_similar_posts(post)),
 +         cache_service.jitter(600),
-+     )</code></pre>
-<div class="callout warn">
-  <span class="label">缓存 QuerySet 时要先 list()</span>
++     )</pre></div>
+<div class="box warn">
+  <div class="t">&#9888; 缓存 QuerySet 时要先 list()</div>
   <p>QuerySet 是惰性的。直接把 QuerySet 放进缓存，pickle 时会触发查询，但很容易误以为缓存的是「查询结果」。用 <code>list()</code> 先求值，存进去的就是确定的 Post 列表。</p>
 </div>
 
-<h3 id="code-signals">6.4 用信号让缓存失效</h3>
-<pre data-file="Chapter03/mysite/blog/signals.py"><code class="language-python" data-include="Chapter03/mysite/blog/signals.py::post_before_save">@receiver(pre_save, sender=Post)
+<h3 id="code-signals">用信号让缓存失效</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/signals.py"><pre data-include="Chapter03/mysite/blog/signals.py::post_before_save">@receiver(pre_save, sender=Post)
 def post_before_save(sender, instance, **kwargs):
     # step-05 记住修改前的文章：如果 slug 或发布日期变了，旧的缓存 key 也要删
-    instance._old = Post.objects.filter(pk=instance.pk).first() if instance.pk else None</code></pre>
+    instance._old = Post.objects.filter(pk=instance.pk).first() if instance.pk else None</pre></div>
 <p>文章的 slug 或发布日期变化后，缓存 Key 也变了。所以在 <code>pre_save</code> 里先取出修改前的记录，保存后把新旧两个 Key 都删掉。</p>
 
-<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<h2 id="lab">动手实验</h2>
 <ol class="steps">
   <li>
     <p>开一个终端运行 MONITOR，然后刷新文章页两次，对比两次请求发出的命令：</p>
-<pre class="cli"><code><span class="prompt">$ </span>docker compose exec redis redis-cli MONITOR | grep -E '"(GET|SET|EVAL)"'
-<span class="out">"GET" "cache:1:post:detail:2026-10-29:hello-redis"       <span class="cmt">← 第一次：未命中</span>
+<div class="code" data-lang="cli"><pre>$ docker compose exec redis redis-cli MONITOR | grep -E '"(GET|SET|EVAL)"'
+"GET" "cache:1:post:detail:2026-10-29:hello-redis"       ← 第一次：未命中
 "SET" "blog:lock:cache:post:detail:…" "987a…" "PX" "10000" "NX"
-"GET" "cache:1:post:detail:2026-10-29:hello-redis"       <span class="cmt">← 拿到锁后的双重检查</span>
-"SET" "cache:1:post:detail:…" "\x80\x05\x95…" "EX" "331"     <span class="cmt">← pickle 后的 Post 对象</span>
+"GET" "cache:1:post:detail:2026-10-29:hello-redis"       ← 拿到锁后的双重检查
+"SET" "cache:1:post:detail:…" "\x80\x05\x95…" "EX" "331"     ← pickle 后的 Post 对象
 "EVAL" "\nif redis.call('GET', KEYS[1]) == ARGV[1] …"
-"GET" "cache:1:post:detail:2026-10-29:hello-redis"       <span class="cmt">← 第二次：直接命中</span></code></pre>
+"GET" "cache:1:post:detail:2026-10-29:hello-redis"       ← 第二次：直接命中</pre></div>
   </li>
   <li>
     <p>查看 db1 里的缓存：</p>
-<pre class="cli"><code><span class="prompt">$ </span>docker compose exec redis redis-cli -n 1 --scan
-<span class="prompt">$ </span>docker compose exec redis redis-cli -n 1 TTL cache:1:sidebar:1:total_posts</code></pre>
+<div class="code" data-lang="cli"><pre>$ docker compose exec redis redis-cli -n 1 --scan
+$ docker compose exec redis redis-cli -n 1 TTL cache:1:sidebar:1:total_posts</pre></div>
   </li>
   <li>访问一个不存在的文章 URL，查看 db1 里对应 Key 的值是否为 <code>__missing__</code>，TTL 是否为 60 秒左右。</li>
   <li>在 Admin 里修改文章标题并保存，刷新文章页，新标题立即生效。</li>
   <li>运行 <code>python manage.py test blog.tests.test_cache</code>，重点看 <code>test_only_one_loader_under_concurrency</code>：10 个线程同时请求，loader 只执行了 1 次。</li>
 </ol>
 
-<h2 id="think"><span class="num">8</span>边界与思考</h2>
-<div class="callout warn">
-  <span class="label">本实现的取舍</span>
+<h2 id="think">边界与思考</h2>
+<div class="box warn">
+  <div class="t">&#9888; 本实现的取舍</div>
   <ul>
     <li><strong>先更新数据库再删缓存，仍然有很小的不一致窗口</strong>：读请求 A 未命中，从数据库读到旧值；写请求 B 更新数据库并删除缓存；然后 A 才把旧值写入缓存。常见对策是「延迟双删」（过几百毫秒再删一次），或者订阅数据库 binlog 来删除缓存。本项目依靠 TTL 兜底。</li>
     <li><strong>锁可能在 loader 执行完之前过期</strong>：如果查询超过 10 秒，锁会自动释放，另一个请求也会去查数据库。生产环境的做法是在持锁期间定时续期（看门狗），或者使用 Redisson、Redlock 等方案。</li>
     <li><strong>pickle 缓存模型对象</strong>：部署新代码时如果模型字段变了，旧缓存反序列化可能出错。可以在发布时修改 <code>CACHES['default']['VERSION']</code>。</li>
   </ul>
 </div>
-<div class="callout think">
-  <span class="label">思考题</span>
+<div class="exercise">
+  <h3>思考题</h3>
   <ol>
     <li>相似文章缓存只靠 TTL 过期。如果要做到给文章修改标签后立即生效，需要删除哪些 Key？</li>
     <li>Django 还有 <code>{% cache 600 sidebar %}</code> 模板片段缓存和 <code>@cache_page</code> 整页缓存。为什么本项目不直接对文章页使用 <code>@cache_page</code>？（提示：浏览量、登录状态）</li>
@@ -384,12 +515,10 @@ def post_before_save(sender, instance, **kwargs):
   </ol>
 </div>
 
-<div class="pager">
-  <a href="04-hot-ranking.html"><small>上一篇</small>← step-04 热门排行榜</a>
-  <a class="next" href="06-likes.html"><small>下一篇</small>step-06 点赞 →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="../assets/site.js"></script>
 </body>
 </html>

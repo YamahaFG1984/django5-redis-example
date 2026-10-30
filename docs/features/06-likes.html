@@ -2,45 +2,38 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>点赞功能</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>点赞功能 — Django × Redis 实战</title>
 <link rel="stylesheet" href="../assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="../assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="../index.html">首页</a>
-    <a href="../01-prd.html">PRD</a>
-    <a href="../02-design.html">设计文档</a>
-    <a href="../index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="06">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">Step 06 · 集合</div>
-  <h1>点赞：用 SET 和 ZSET 存同一份关系</h1>
-  <p class="lead">点赞看起来简单，但要同时回答「这篇文章多少赞」「我赞过没有」「我赞过哪些文章」三个问题。这一章用 SET 存「文章 → 点赞用户」，用 ZSET 存「用户 → 点赞过的文章」，再用一个 pipeline 把列表页需要的数据一次取回。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">Step 06 · 集合</span>
+<h1>点赞：用 SET 和 ZSET 存同一份关系</h1>
+<p class="lede">点赞看起来简单，但要同时回答「这篇文章多少赞」「我赞过没有」「我赞过哪些文章」三个问题。这一章用 SET 存「文章 → 点赞用户」，用 ZSET 存「用户 → 点赞过的文章」，再用一个 pipeline 把列表页需要的数据一次取回。</p>
+<div class="meta">
     <span class="pill tag">git checkout step-06-likes</span>
-    <span class="t set">SET</span><span class="t zset">ZSET</span>
-  </div>
-</section>
+    <span class="rt set">SET</span><span class="rt zset">ZSET</span>
+</div>
 
-<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 SET 实现幂等的点赞</li>
+    <li>理解「双向索引」：同一份关系存两份</li>
+    <li>用 pipeline + <code>ZMSCORE</code> 把列表页的读取压缩到 1 次往返</li>
+    <li>弄清 MULTI 的原子性边界</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">场景分析</h2>
 <p>PRD F4 的要求可以归纳为下面这些读写操作：</p>
-<div class="table-wrap"><table>
+<div class="tw"><table>
   <thead><tr><th>操作</th><th>频率</th><th>需要的能力</th></tr></thead>
   <tbody>
     <tr><td>点赞 / 取消点赞</td><td>中</td><td>幂等：重复点赞不会重复计数</td></tr>
@@ -51,8 +44,8 @@
 </table></div>
 <p>如果用数据库，需要建一张 <code>likes(user_id, post_id, created)</code> 表加唯一索引。列表页 10 篇文章，要执行 <code>COUNT(*) GROUP BY post_id</code> 和 <code>WHERE user_id = ? AND post_id IN (…)</code> 两个查询，并且点赞数据增长很快。</p>
 
-<h2 id="choose"><span class="num">2</span>方案选型</h2>
-<div class="table-wrap"><table>
+<h2 id="choose">方案选型</h2>
+<div class="tw"><table>
   <thead><tr><th>结构</th><th>点赞数</th><th>是否赞过</th><th>按时间列出</th><th>结论</th></tr></thead>
   <tbody>
     <tr><td><strong>SET</strong> 文章 → 用户</td><td><code>SCARD</code> O(1)</td><td><code>SISMEMBER</code> O(1)</td><td>✗ 无序</td><td>✓ 用于文章维度</td></tr>
@@ -63,36 +56,45 @@
 </table></div>
 
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  subgraph posts["文章维度 SET"]
-    PA["blog:post:1:likers<br/>{3, 5, 8}"]
-    PB["blog:post:2:likers<br/>{3}"]
-  end
-  subgraph users["用户维度 ZSET"]
-    U3["blog:user:3:likes<br/>2 → 1793340000<br/>1 → 1793330000"]
-    U5["blog:user:5:likes<br/>1 → 1793331000"]
-  end
-  PA <-.同一份关系.-> U3
-  PA <-.-> U5
-  PB <-.-> U3
-  </pre></div>
-  <figcaption>图 1　双向索引：同一条「用户 3 赞了文章 1」的关系，在两个结构中各存一份，分别服务两个方向的查询</figcaption>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="双向索引">
+  <rect class="bx-a" x="10" y="10" width="300" height="200" rx="10"/>
+  <text class="ttl on-a" x="26" y="34">文章维度 SET</text>
+  <rect class="bx" x="30" y="50" width="260" height="56" rx="8"/>
+  <text class="sm mono" x="160" y="74" text-anchor="middle">blog:post:1:likers</text>
+  <text class="lbl mono" x="160" y="91" text-anchor="middle">{3, 5, 8}</text>
+  <rect class="bx" x="30" y="130" width="260" height="56" rx="8"/>
+  <text class="sm mono" x="160" y="154" text-anchor="middle">blog:post:2:likers</text>
+  <text class="lbl mono" x="160" y="171" text-anchor="middle">{3}</text>
+  <rect class="bx-r" x="450" y="10" width="300" height="200" rx="10"/>
+  <text class="ttl on-r" x="466" y="34">用户维度 ZSET</text>
+  <rect class="bx" x="470" y="50" width="260" height="70" rx="8"/>
+  <text class="sm mono" x="600" y="72.5" text-anchor="middle">blog:user:3:likes</text>
+  <text class="sm mono" x="600" y="89.5" text-anchor="middle">2 → 1793340000</text>
+  <text class="sm mono" x="600" y="106.5" text-anchor="middle">1 → 1793330000</text>
+  <rect class="bx" x="470" y="140" width="260" height="50" rx="8"/>
+  <text class="sm mono" x="600" y="161" text-anchor="middle">blog:user:5:likes</text>
+  <text class="sm mono" x="600" y="178" text-anchor="middle">1 → 1793331000</text>
+  <path class="ln-d" d="M290 72 L468 80" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <path class="ln-d" d="M290 82 L468 162" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <path class="ln-d" d="M290 158 L468 92" marker-end="url(#ar)" marker-start="url(#ar)"/>
+  <text class="sm" x="380" y="30" text-anchor="middle">同一份关系，存两份</text>
+</svg>
+<figcaption>图 6-1　双向索引：同一条「用户 3 赞了文章 1」的关系，在两个结构中各存一份，分别服务两个方向的查询</figcaption>
 </figure>
-<div class="callout info">
-  <span class="label">用空间换时间</span>
+<div class="box note">
+  <div class="t">&#9432; 用空间换时间</div>
   <p>数据库里通常一张表加两个索引就能支持两个方向的查询。Redis 没有二级索引，所以要自己维护两个结构，代价是写入时必须同时修改两处，下面用 MULTI 事务保证这一点。</p>
 </div>
 
-<h2 id="keys"><span class="num">3</span>Key 设计</h2>
+<h2 id="keys">Key 设计</h2>
 <div class="keys">
   <div class="rk">
-    <div class="rk-head"><span class="t set">SET</span><code>blog:post:1:likers</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-head"><span class="rt set">SET</span><code>blog:post:1:likers</code><span class="ttl">TTL ∞</span></div>
     <div class="rk-body"><div class="chips"><span class="chip">3</span><span class="chip">5</span><span class="chip">8</span></div></div>
     <div class="rk-note">SCARD = 3 个赞。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:user:3:likes</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-head"><span class="rt zset">ZSET</span><code>blog:user:3:likes</code><span class="ttl">TTL ∞</span></div>
     <div class="rk-body">
       <div class="row"><span>2</span><span class="score">1793340000.12</span></div>
       <div class="row"><span>1</span><span class="score">1793330000.55</span></div>
@@ -100,7 +102,7 @@ flowchart LR
     <div class="rk-note">score 是点赞时的 Unix 时间戳。</div>
   </div>
 </div>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-06"># ---------------------------------------------------------------- step-06 点赞
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><pre data-include="Chapter03/mysite/blog/redis_keys.py::#step-06"># ---------------------------------------------------------------- step-06 点赞
 def post_likers(post_id):
     """SET  给这篇文章点过赞的用户 ID"""
     return _k('post', post_id, 'likers')
@@ -108,90 +110,115 @@ def post_likers(post_id):
 
 def user_likes(user_id):
     """ZSET  用户点赞过的文章：member = 文章 ID，score = 点赞时间戳"""
-    return _k('user', user_id, 'likes')</code></pre>
+    return _k('user', user_id, 'likes')</pre></div>
 
-<h2 id="flow"><span class="num">4</span>流程</h2>
-<h3 id="flow-like">4.1 点赞</h3>
+<h2 id="flow">流程</h2>
+<h3 id="flow-like">点赞</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant B as 浏览器
-  participant V as post_like 视图
-  participant R as Redis
-  B->>V: POST /blog/1/like/ action=like
-  V->>V: @login_required 检查登录<br/>@require_POST 只接受 POST
-  V->>R: MULTI
-  V->>R: SADD blog:post:1:likers 3
-  V->>R: ZADD blog:user:3:likes NX 1793340000 1
-  V->>R: EXEC
-  R-->>V: [1, 1]（1 = 新增，0 = 已存在）
-  V-->>B: 302 → 文章详情页
-  Note over B,V: Post/Redirect/Get：刷新页面不会重复提交表单
-  </pre></div>
-  <figcaption>图 2　点赞请求。SADD 本身就是幂等的，重复执行返回 0，集合不变</figcaption>
+<svg class="dgm" viewBox="0 0 760 368" role="img" aria-label="点赞请求">
+  <path class="life" d="M84 54 L84 362"/>
+  <path class="life" d="M348.32 54 L348.32 362"/>
+  <path class="life" d="M676 54 L676 362"/>
+  <rect class="bx-b" x="36" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-b" x="84" y="39" text-anchor="middle">浏览器</text>
+  <rect class="bx" x="286.53" y="14" width="123.58" height="40" rx="8"/>
+  <text class="ttl" x="348.32" y="39" text-anchor="middle">post_like 视图</text>
+  <rect class="bx-r" x="628" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="676" y="39" text-anchor="middle">Redis</text>
+  <text class="lbl mono" x="216.16" y="76" text-anchor="middle">POST /blog/1/like/ action=like</text>
+  <path class="ln" d="M89 82 L342.32 82" marker-end="url(#ar)"/>
+  <path class="ln" d="M353.32 108 h22 v38 h-16" marker-end="url(#ar)"/>
+  <text class="lbl" x="382.32" y="126">@login_required 检查登录</text>
+  <text class="lbl" x="382.32" y="142">@require_POST 只接受 POST</text>
+  <text class="lbl mono" x="512.16" y="168" text-anchor="middle">MULTI</text>
+  <text class="lbl mono" x="512.16" y="184" text-anchor="middle">SADD blog:post:1:likers 3</text>
+  <text class="lbl mono" x="512.16" y="200" text-anchor="middle">ZADD blog:user:3:likes NX 1793340000 1</text>
+  <text class="lbl mono" x="512.16" y="216" text-anchor="middle">EXEC</text>
+  <path class="ln-r" d="M353.32 222 L670 222" marker-end="url(#ar-r)"/>
+  <text class="lbl" x="512.16" y="250" text-anchor="middle">[1, 1]（1 = 新增，0 = 已存在）</text>
+  <path class="ln-d" d="M671 256 L354.32 256" marker-end="url(#ar)"/>
+  <text class="lbl" x="216.16" y="284" text-anchor="middle">302 → 文章详情页</text>
+  <path class="ln-d" d="M343.32 290 L90 290" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="64" y="310" width="304.32" height="26" rx="6"/>
+  <text class="sm on-g" x="216.16" y="326" text-anchor="middle">Post/Redirect/Get：刷新页面不会重复提交</text>
+</svg>
+<figcaption>图 6-2　点赞请求。SADD 本身就是幂等的，重复执行返回 0，集合不变</figcaption>
 </figure>
 
-<h3 id="flow-list">4.2 列表页批量读取</h3>
+<h3 id="flow-list">列表页批量读取</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  subgraph PIPE["一个 pipeline，1 次网络往返"]
-    direction TB
-    S1["SCARD blog:post:1:likers"]
-    S2["SCARD blog:post:2:likers"]
-    S3["SCARD blog:post:3:likers"]
-    Z["ZMSCORE blog:user:3:likes 1 2 3"]
-  end
-  PIPE --> RES["[3, 1, 0, [1793330000.0, 1793340000.0, None]]"]
-  RES --> OUT["post1: ♥ 3（已赞）<br/>post2: ♥ 1（已赞）<br/>post3: ♡ 0"]
-  </pre></div>
-  <figcaption>图 3　SCARD 取每篇的点赞数，ZMSCORE 一次判断当前用户赞过其中哪几篇</figcaption>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="列表页批量读取">
+  <rect class="bx-a" x="10" y="10" width="360" height="180" rx="10"/>
+  <text class="ttl on-a" x="26" y="34">一个 pipeline，1 次网络往返</text>
+  <rect class="bx" x="26" y="46" width="328" height="28" rx="8"/>
+  <text class="sm mono" x="190" y="64.5" text-anchor="middle">SCARD blog:post:1:likers</text>
+  <rect class="bx" x="26" y="80" width="328" height="28" rx="8"/>
+  <text class="sm mono" x="190" y="98.5" text-anchor="middle">SCARD blog:post:2:likers</text>
+  <rect class="bx" x="26" y="114" width="328" height="28" rx="8"/>
+  <text class="sm mono" x="190" y="132.5" text-anchor="middle">SCARD blog:post:3:likers</text>
+  <rect class="bx-r" x="26" y="148" width="328" height="28" rx="8"/>
+  <text class="sm mono" x="190" y="166.5" text-anchor="middle">ZMSCORE blog:user:3:likes 1 2 3</text>
+  <rect class="bx" x="410" y="50" width="340" height="44" rx="8"/>
+  <text class="sm mono" x="580" y="76.5" text-anchor="middle">[3, 1, 0, [1793330000.0, 1793340000.0, None]]</text>
+  <path class="ln" d="M370 100 L408 72" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="410" y="126" width="106" height="50" rx="8"/>
+  <text class="lbl mono" x="463" y="147" text-anchor="middle">post 1</text>
+  <text class="sm" x="463" y="164" text-anchor="middle">♥ 3 · 已赞</text>
+  <rect class="bx-g" x="526" y="126" width="106" height="50" rx="8"/>
+  <text class="lbl mono" x="579" y="147" text-anchor="middle">post 2</text>
+  <text class="sm" x="579" y="164" text-anchor="middle">♥ 1 · 已赞</text>
+  <rect class="bx" x="642" y="126" width="106" height="50" rx="8"/>
+  <text class="lbl mono" x="695" y="147" text-anchor="middle">post 3</text>
+  <text class="sm" x="695" y="164" text-anchor="middle">♡ 0</text>
+  <path class="ln" d="M580 94 L580 128" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 6-3　SCARD 取每篇的点赞数，ZMSCORE 一次判断当前用户赞过其中哪几篇</figcaption>
 </figure>
-<div class="callout tip">
-  <span class="label">为什么用 ZMSCORE 判断「是否赞过」</span>
+<div class="box tip">
+  <div class="t">&#10003; 为什么用 ZMSCORE 判断「是否赞过」</div>
   <p>要判断「用户 3 是否赞过文章 1、2、3」，如果用文章维度的 SET，需要 3 次 <code>SISMEMBER</code>（每篇文章一个 Key）。用户维度的 ZSET 只有一个 Key，<code>ZMSCORE</code>（Redis 6.2+）一条命令就能查出多个文章的分数，返回 nil 的就是没赞过。</p>
 </div>
 
-<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
-<pre class="cli"><code><span class="prompt">&gt; </span>SADD blog:post:1:likers 3
-<span class="out">(integer) 1</span>
-<span class="prompt">&gt; </span>SADD blog:post:1:likers 3                 <span class="cmt"># 重复点赞</span>
-<span class="out">(integer) 0</span>
-<span class="prompt">&gt; </span>SADD blog:post:1:likers 5 8
-<span class="prompt">&gt; </span>SCARD blog:post:1:likers
-<span class="out">(integer) 3</span>
-<span class="prompt">&gt; </span>SISMEMBER blog:post:1:likers 5
-<span class="out">(integer) 1</span>
-<span class="prompt">&gt; </span>SMISMEMBER blog:post:1:likers 3 4 5     <span class="cmt"># 一次判断多个用户</span>
-<span class="out">1) (integer) 1
+<h2 id="cli">用 redis-cli 体验</h2>
+<div class="code" data-lang="cli"><pre>&gt; SADD blog:post:1:likers 3
+(integer) 1
+&gt; SADD blog:post:1:likers 3                 # 重复点赞
+(integer) 0
+&gt; SADD blog:post:1:likers 5 8
+&gt; SCARD blog:post:1:likers
+(integer) 3
+&gt; SISMEMBER blog:post:1:likers 5
+(integer) 1
+&gt; SMISMEMBER blog:post:1:likers 3 4 5     # 一次判断多个用户
+1) (integer) 1
 2) (integer) 0
-3) (integer) 1</span>
-<span class="prompt">&gt; </span>ZADD blog:user:3:likes NX 1793330000 1 1793340000 2
-<span class="prompt">&gt; </span>ZMSCORE blog:user:3:likes 1 2 99
-<span class="out">1) "1793330000"
+3) (integer) 1
+&gt; ZADD blog:user:3:likes NX 1793330000 1 1793340000 2
+&gt; ZMSCORE blog:user:3:likes 1 2 99
+1) "1793330000"
 2) "1793340000"
-3) (nil)</span>
-<span class="prompt">&gt; </span>SINTER blog:post:1:likers blog:post:2:likers    <span class="cmt"># 两篇都赞过的人</span></code></pre>
+3) (nil)
+&gt; SINTER blog:post:1:likers blog:post:2:likers    # 两篇都赞过的人</pre></div>
 
-<h2 id="code"><span class="num">6</span>代码实现</h2>
-<h3 id="code-write">6.1 点赞 / 取消</h3>
-<pre data-file="Chapter03/mysite/blog/services/likes.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/likes.py::like">def like(user_id, post_id):
+<h2 id="code">代码实现</h2>
+<h3 id="code-write">点赞 / 取消</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/likes.py"><pre data-include="Chapter03/mysite/blog/services/likes.py::like">def like(user_id, post_id):
     """点赞。返回 True 表示这次是新点赞，False 表示之前已经赞过（幂等）。"""
     pipe = get_redis().pipeline()
     pipe.sadd(K.post_likers(post_id), user_id)
     # NX：已经赞过的话不更新时间
     pipe.zadd(K.user_likes(user_id), {post_id: time.time()}, nx=True)
     added, _ = pipe.execute()
-    return added == 1</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/likes.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/likes.py::unlike">def unlike(user_id, post_id):
+    return added == 1</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/likes.py"><pre data-include="Chapter03/mysite/blog/services/likes.py::unlike">def unlike(user_id, post_id):
     """取消点赞。返回 True 表示确实取消了，False 表示本来就没赞过。"""
     pipe = get_redis().pipeline()
     pipe.srem(K.post_likers(post_id), user_id)
     pipe.zrem(K.user_likes(user_id), post_id)
     removed, _ = pipe.execute()
-    return removed == 1</code></pre>
-<h3 id="code-read">6.2 批量读取</h3>
-<pre data-file="Chapter03/mysite/blog/services/likes.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/likes.py::attach_like_info">def attach_like_info(posts, user=None):
+    return removed == 1</pre></div>
+<h3 id="code-read">批量读取</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/likes.py"><pre data-include="Chapter03/mysite/blog/services/likes.py::attach_like_info">def attach_like_info(posts, user=None):
     """
     给一组文章设置 like_count 和 liked 属性，固定 1 次网络往返：
     N 个 SCARD + 1 个 ZMSCORE 放在同一个 pipeline 里。
@@ -210,19 +237,19 @@ flowchart LR
     for post, count, score in zip(posts, results, liked):
         post.like_count = count
         post.liked = score is not None
-    return posts</code></pre>
-<div class="callout info">
-  <span class="label">transaction=False</span>
+    return posts</pre></div>
+<div class="box note">
+  <div class="t">&#9432; transaction=False</div>
   <p>只读操作不需要 MULTI/EXEC 的原子性，<code>pipeline(transaction=False)</code> 只是把命令打包发送，开销更小。写操作（like / unlike）需要两个结构一起修改，所以用默认的事务模式。</p>
 </div>
-<h3 id="code-list">6.3 我的点赞</h3>
-<pre data-file="Chapter03/mysite/blog/services/likes.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/likes.py::liked_posts">def liked_posts(user_id, count=20):
+<h3 id="code-list">我的点赞</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/likes.py"><pre data-include="Chapter03/mysite/blog/services/likes.py::liked_posts">def liked_posts(user_id, count=20):
     """用户最近点赞的文章，按点赞时间倒序。"""
     ids = [int(i) for i in get_redis().zrevrange(K.user_likes(user_id), 0, count - 1)]
     posts = Post.published.in_bulk(ids)
-    return [posts[i] for i in ids if i in posts]</code></pre>
-<h3 id="code-view">6.4 视图</h3>
-<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-python" data-include="Chapter03/mysite/blog/views.py::post_like">@login_required
+    return [posts[i] for i in ids if i in posts]</pre></div>
+<h3 id="code-view">视图</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/views.py"><pre data-include="Chapter03/mysite/blog/views.py::post_like">@login_required
 @require_POST
 def post_like(request, post_id):
     post = get_object_or_404(
@@ -234,34 +261,34 @@ def post_like(request, post_id):
         likes.unlike(request.user.id, post.id)
     else:
         likes.like(request.user.id, post.id)
-    return redirect(post)</code></pre>
+    return redirect(post)</pre></div>
 
-<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<h2 id="lab">动手实验</h2>
 <ol class="steps">
   <li>用 alice 登录，给 2 篇文章点赞，然后打开侧边栏里的「My likes」。</li>
   <li>换 bob 登录，给其中一篇点赞，回到列表页看点赞数和 ♥ 标记。</li>
   <li>
     <p>在 redis-cli 里看数据：</p>
-<pre class="cli"><code><span class="prompt">&gt; </span>SMEMBERS blog:post:1:likers
-<span class="prompt">&gt; </span>ZRANGE blog:user:2:likes 0 -1 WITHSCORES
-<span class="prompt">&gt; </span>MEMORY USAGE blog:post:1:likers       <span class="cmt"># 元素少且都是整数时，SET 用 intset 编码，非常省内存</span>
-<span class="prompt">&gt; </span>OBJECT ENCODING blog:post:1:likers
-<span class="out">"intset"</span></code></pre>
+<div class="code" data-lang="cli"><pre>&gt; SMEMBERS blog:post:1:likers
+&gt; ZRANGE blog:user:2:likes 0 -1 WITHSCORES
+&gt; MEMORY USAGE blog:post:1:likers       # 元素少且都是整数时，SET 用 intset 编码，非常省内存
+&gt; OBJECT ENCODING blog:post:1:likers
+"intset"</pre></div>
   </li>
   <li>未登录状态下点 Like 按钮，会跳转到登录页，登录后回到原来的位置。</li>
 </ol>
 
-<h2 id="think"><span class="num">8</span>边界与思考</h2>
-<div class="callout warn">
-  <span class="label">本实现的取舍</span>
+<h2 id="think">边界与思考</h2>
+<div class="box warn">
+  <div class="t">&#9888; 本实现的取舍</div>
   <ul>
     <li><strong>点赞数据只存在 Redis</strong>：依赖 AOF 持久化（见设计文档「模式 C」）。生产环境通常会通过消息队列异步写入数据库，作为对账和恢复的依据。</li>
     <li><strong>百万赞的文章</strong>：SET 中有 100 万个用户 ID 时大约占几十 MB，而且是大 Key。可以只用 SET 存最近的点赞用户，另外用 STRING 计数器存总数；「是否赞过」改为查用户维度的 ZSET。</li>
     <li><strong>MULTI 不是回滚事务</strong>：其中一条命令出错（比如类型错误），其他命令照样执行。它只保证这几条命令连续执行，中间不会插入其他客户端的命令。</li>
   </ul>
 </div>
-<div class="callout think">
-  <span class="label">思考题</span>
+<div class="exercise">
+  <h3>思考题</h3>
   <ol>
     <li>想做「点赞排行榜」，需要新增什么结构？能否在 <code>like()</code> 的同一个事务里维护？</li>
     <li>如果想显示「alice、bob 等 23 人赞过」，应该用 <code>SRANDMEMBER</code> 还是另建一个 LIST 存最近的点赞用户？</li>
@@ -269,12 +296,10 @@ def post_like(request, post_id):
   </ol>
 </div>
 
-<div class="pager">
-  <a href="05-cache.html"><small>上一篇</small>← step-05 缓存</a>
-  <a class="next" href="07-checkin.html"><small>下一篇</small>step-07 签到 →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="../assets/site.js"></script>
 </body>
 </html>

@@ -2,48 +2,41 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>评论通知与消息队列</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>评论通知与消息队列 — Django × Redis 实战</title>
 <link rel="stylesheet" href="../assets/style.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
-<script src="../assets/doc.js"></script>
 </head>
-<body>
-<header class="topbar">
-  <a class="brand" href="../index.html">Django × Redis 实战</a>
-  <nav>
-    <a href="../index.html">首页</a>
-    <a href="../01-prd.html">PRD</a>
-    <a href="../02-design.html">设计文档</a>
-    <a href="../index.html#chapters">功能章节</a>
-  </nav>
-  <span class="spacer"></span>
-  <button class="theme-btn" type="button">☾ 深色</button>
-</header>
-
-<div class="layout">
-<aside class="toc"></aside>
+<body data-page="12">
+<div id="app">
+<aside id="sidebar"></aside>
 <main>
 
-<section class="hero">
-  <div class="eyebrow">Step 12 · 消息队列</div>
-  <h1>评论通知：用 Stream 消费组做可靠的异步任务</h1>
-  <p class="lead">有人评论时通知文章作者。Web 请求只往 Stream 里写一条事件就返回，由后台进程以消费组的方式读取、处理、确认。进程崩溃后，没确认的消息会被其他消费者接管，不会丢失。</p>
-  <div class="meta">
+<span class="chapter-eyebrow">Step 12 · 消息队列</span>
+<h1>评论通知：用 Stream 消费组做可靠的异步任务</h1>
+<p class="lede">有人评论时通知文章作者。Web 请求只往 Stream 里写一条事件就返回，由后台进程以消费组的方式读取、处理、确认。进程崩溃后，没确认的消息会被其他消费者接管，不会丢失。</p>
+<div class="meta">
     <span class="pill tag">git checkout step-12-notifications</span>
-    <span class="t stream">STREAM</span><span class="t list">LIST</span><span class="t string">STRING</span>
-  </div>
-</section>
+    <span class="rt stream">STREAM</span><span class="rt list">LIST</span><span class="rt string">STRING</span>
+</div>
 
-<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>比较 LIST、Pub/Sub、Stream 三种消息队列</li>
+    <li>理解消费组、PEL 和 ACK</li>
+    <li>用 <code>XAUTOCLAIM</code> 接管崩溃消费者的消息</li>
+    <li>用 <code>transaction.on_commit</code> 保证事件在提交后才发出</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="scene">场景分析</h2>
 <p>PRD F10：评论提交后立即返回，不被通知逻辑拖慢；侧边栏显示未读数；后台进程崩溃重启后，未处理的消息不丢失；每个作者最多保留 50 条通知。</p>
 <p>「通知」这一类工作（发站内信、发邮件、推送）有几个共同点：<strong>可能很慢</strong>（发邮件要连 SMTP）、<strong>可能失败</strong>、<strong>不需要在请求里同步完成</strong>。所以应该交给后台进程，Web 进程和后台进程之间需要一个消息队列。</p>
 
-<h2 id="choose"><span class="num">2</span>Redis 中的三种消息队列</h2>
-<div class="table-wrap"><table>
+<h2 id="choose">Redis 中的三种消息队列</h2>
+<div class="tw"><table>
   <thead><tr><th></th><th>LIST（LPUSH + BRPOP）</th><th>Pub/Sub</th><th>✓ STREAM</th></tr></thead>
   <tbody>
     <tr><td>消息持久化</td><td>✓</td><td>✗ 订阅者不在线就收不到</td><td>✓</td></tr>
@@ -56,49 +49,92 @@
   </tbody>
 </table></div>
 
-<h2 id="model"><span class="num">3</span>Stream 消费组模型</h2>
+<h2 id="model">Stream 消费组模型</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-flowchart LR
-  P1["Web 进程 1"] -->|XADD| S
-  P2["Web 进程 2"] -->|XADD| S
-  subgraph S["STREAM blog:stream:comments"]
-    direction LR
-    e1["1793346600000-0<br/>comment_id=31"] --- e2["1793346685285-0<br/>comment_id=32"] --- e3["…-0<br/>comment_id=33"]
-  end
-  S --> G
-  subgraph G["消费组 notifier（last-delivered-id）"]
-    direction TB
-    C1["消费者 worker-a"]
-    C2["消费者 worker-b"]
-    PEL["PEL 待确认列表<br/>已投递、未 ACK 的消息"]
-  end
-  C1 -->|XACK| PEL
-  C2 -->|XACK| PEL
-  G2["（另一个消费组，比如 email-sender）"] -.各自独立消费全部消息.- S
-  </pre></div>
-  <figcaption>图 1　同一个组内的消费者分摊消息；不同的组各自拿到全部消息。每条消息投递后进入 PEL，ACK 后才移出</figcaption>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Stream 消费组模型">
+  <rect class="bx" x="10" y="40" width="120" height="40" rx="8"/>
+  <text class="lbl" x="70" y="64.5" text-anchor="middle">Web 进程 1</text>
+  <rect class="bx" x="10" y="100" width="120" height="40" rx="8"/>
+  <text class="lbl" x="70" y="124.5" text-anchor="middle">Web 进程 2</text>
+  <rect class="bx-y" x="170" y="20" width="400" height="140" rx="10"/>
+  <text class="ttl on-y mono" x="186" y="44">STREAM blog:stream:comments</text>
+  <rect class="bx" x="186" y="60" width="116" height="56" rx="8"/>
+  <text class="sm mono" x="244" y="84" text-anchor="middle">…600000-0</text>
+  <text class="sm mono" x="244" y="101" text-anchor="middle">comment_id=31</text>
+  <rect class="bx" x="312" y="60" width="116" height="56" rx="8"/>
+  <text class="sm mono" x="370" y="84" text-anchor="middle">…685285-0</text>
+  <text class="sm mono" x="370" y="101" text-anchor="middle">comment_id=32</text>
+  <path class="ln" d="M302 88 L310 88"/>
+  <rect class="bx" x="438" y="60" width="116" height="56" rx="8"/>
+  <text class="sm mono" x="496" y="84" text-anchor="middle">…699001-0</text>
+  <text class="sm mono" x="496" y="101" text-anchor="middle">comment_id=33</text>
+  <path class="ln" d="M428 88 L436 88"/>
+  <text class="sm" x="186" y="142">ID = 毫秒时间戳-序号，单调递增</text>
+  <path class="ln-y" d="M130 60 L168 80" marker-end="url(#ar-y)"/>
+  <path class="ln-y" d="M130 120 L168 100" marker-end="url(#ar-y)"/>
+  <text class="sm mono" x="150" y="94" text-anchor="middle">XADD</text>
+  <rect class="bx-a" x="170" y="186" width="400" height="130" rx="10"/>
+  <text class="ttl on-a" x="186" y="208">消费组 notifier（last-delivered-id）</text>
+  <rect class="bx" x="186" y="222" width="120" height="40" rx="8"/>
+  <text class="lbl mono" x="246" y="246.5" text-anchor="middle">worker-a</text>
+  <rect class="bx" x="186" y="268" width="120" height="40" rx="8"/>
+  <text class="lbl mono" x="246" y="292.5" text-anchor="middle">worker-b</text>
+  <rect class="bx-r" x="360" y="226" width="196" height="76" rx="8"/>
+  <text class="ttl on-r" x="458" y="251" text-anchor="middle">PEL 待确认列表</text>
+  <text class="sm" x="458" y="269" text-anchor="middle">已投递、未 ACK 的消息</text>
+  <text class="sm" x="458" y="286" text-anchor="middle">XACK 后移出</text>
+  <path class="ln-r" d="M306 242 L358 252" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M306 288 L358 276" marker-end="url(#ar-r)"/>
+  <path class="ln-a" d="M370 160 L370 184" marker-end="url(#ar-a)"/>
+  <rect class="bx-d" x="600" y="60" width="150" height="76" rx="8"/>
+  <text class="lbl" x="675" y="85.5" text-anchor="middle">另一个消费组</text>
+  <text class="sm" x="675" y="102.5" text-anchor="middle">比如 email-sender</text>
+  <text class="sm" x="675" y="119.5" text-anchor="middle">独立消费全部消息</text>
+  <path class="ln-d" d="M570 98 H598" marker-end="url(#ar)"/>
+  <text class="sm" x="600" y="200">同一组内：消费者分摊消息</text>
+  <text class="sm" x="600" y="220">不同组之间：各自拿到全部</text>
+</svg>
+<figcaption>图 12-1　同一个组内的消费者分摊消息；不同的组各自拿到全部消息。每条消息投递后进入 PEL，ACK 后才移出</figcaption>
 </figure>
 
-<h3 id="lifecycle">3.1 一条消息的生命周期</h3>
+<h3 id="lifecycle">一条消息的生命周期</h3>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-stateDiagram-v2
-  [*] --> 已写入: XADD
-  已写入 --> 待确认: XREADGROUP 投递给 worker-a
-  待确认 --> 已确认: XACK（处理成功）
-  待确认 --> 待确认: worker-a 崩溃，消息留在 PEL
-  待确认 --> 被接管: 空闲超过 60 秒，worker-b 执行 XAUTOCLAIM
-  被接管 --> 已确认: worker-b 处理并 XACK
-  已确认 --> [*]: MAXLEN ~ 截断时被删除
-  </pre></div>
-  <figcaption>图 2　只要没有 ACK，消息就一直在 PEL 中，保证至少被处理一次（at-least-once）</figcaption>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="一条消息的生命周期">
+  <rect class="bx" x="10" y="90" width="110" height="44" rx="8"/>
+  <text class="ttl" x="65" y="107.5" text-anchor="middle">已写入</text>
+  <text class="sm mono" x="65" y="125.5" text-anchor="middle">XADD</text>
+  <rect class="bx-y" x="200" y="90" width="130" height="44" rx="8"/>
+  <text class="ttl on-y" x="265" y="107.5" text-anchor="middle">待确认</text>
+  <text class="sm" x="265" y="125.5" text-anchor="middle">在 PEL 中</text>
+  <rect class="bx-g" x="430" y="20" width="140" height="44" rx="8"/>
+  <text class="ttl on-g" x="500" y="37.5" text-anchor="middle">已确认</text>
+  <text class="sm mono" x="500" y="55.5" text-anchor="middle">XACK</text>
+  <rect class="bx-a" x="430" y="170" width="140" height="44" rx="8"/>
+  <text class="ttl on-a" x="500" y="187.5" text-anchor="middle">被接管</text>
+  <text class="sm mono" x="500" y="205.5" text-anchor="middle">XAUTOCLAIM</text>
+  <rect class="bx-d" x="640" y="20" width="110" height="44" rx="8"/>
+  <text class="ttl" x="695" y="37.5" text-anchor="middle">被截断</text>
+  <text class="sm mono" x="695" y="55.5" text-anchor="middle">MAXLEN ~</text>
+  <path class="ln" d="M120 112 L198 112" marker-end="url(#ar)"/>
+  <text class="sm" x="160" y="104" text-anchor="middle">投递</text>
+  <path class="ln-g" d="M330 100 L360 100 L360 42 L428 42" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="368" y="36">处理成功</text>
+  <path class="ln-r" d="M240 134 C 230 170, 300 170, 290 136" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="265" y="186" text-anchor="middle">消费者崩溃，消息留在 PEL</text>
+  <path class="ln-a" d="M330 124 L360 124 L360 192 L428 192" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="368" y="184">空闲超过 60 秒</text>
+  <path class="ln-g" d="M500 170 L500 66" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="508" y="120">处理并 ACK</text>
+  <path class="ln" d="M570 42 L638 42" marker-end="url(#ar)"/>
+  <text class="sm" x="10" y="244">只要没有 ACK，消息就一直在 PEL 里：至少被处理一次（at-least-once）</text>
+</svg>
+<figcaption>图 12-2　只要没有 ACK，消息就一直在 PEL 中，保证至少被处理一次（at-least-once）</figcaption>
 </figure>
 
-<h2 id="keys"><span class="num">4</span>Key 设计</h2>
+<h2 id="keys">Key 设计</h2>
 <div class="keys">
   <div class="rk">
-    <div class="rk-head"><span class="t stream">STREAM</span><code>blog:stream:comments</code><span class="ttl">MAXLEN ~10000</span></div>
+    <div class="rk-head"><span class="rt stream">STREAM</span><code>blog:stream:comments</code><span class="ttl">MAXLEN ~10000</span></div>
     <div class="rk-body">
       <div class="row"><span>1793346685285-0</span><span>comment_id=32 post_id=1</span></div>
       <div class="row"><span>1793346699001-0</span><span>comment_id=33 post_id=9</span></div>
@@ -106,16 +142,16 @@ stateDiagram-v2
     <div class="rk-note">ID = 毫秒时间戳-序号，由 Redis 自动生成，单调递增。</div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t list">LIST</span><code>blog:user:1:inbox</code><span class="ttl">≤ 50 条</span></div>
+    <div class="rk-head"><span class="rt list">LIST</span><code>blog:user:1:inbox</code><span class="ttl">≤ 50 条</span></div>
     <div class="rk-body"><div class="list-cells"><span>{"name":"Dave",…}</span><span>{"name":"Bob",…}</span></div></div>
   </div>
   <div class="rk">
-    <div class="rk-head"><span class="t string">STRING</span><code>blog:user:1:unread</code><span class="ttl">∞</span></div>
+    <div class="rk-head"><span class="rt string">STRING</span><code>blog:user:1:unread</code><span class="ttl">∞</span></div>
     <div class="rk-body"><span class="val">2</span></div>
     <div class="rk-note">INCR 累加，打开通知页时 SET 0。</div>
   </div>
 </div>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-12"># ---------------------------------------------------------------- step-12 评论通知
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><pre data-include="Chapter03/mysite/blog/redis_keys.py::#step-12"># ---------------------------------------------------------------- step-12 评论通知
 def stream_comments():
     """STREAM  评论事件，约保留最近 1 万条；消费组 notifier"""
     return _k('stream', 'comments')
@@ -128,84 +164,111 @@ def user_inbox(user_id):
 
 def user_unread(user_id):
     """STRING  未读通知数"""
-    return _k('user', user_id, 'unread')</code></pre>
+    return _k('user', user_id, 'unread')</pre></div>
 
-<h2 id="flow"><span class="num">5</span>端到端流程</h2>
+<h2 id="flow">端到端流程</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-sequenceDiagram
-  participant B as 读者
-  participant W as Web（post_comment）
-  participant DB as PostgreSQL
-  participant R as Redis
-  participant K as notify_worker
-  B->>W: POST 评论
-  W->>DB: INSERT comment（事务）
-  DB-->>W: COMMIT
-  W->>R: on_commit → XADD stream MAXLEN ~ 10000 * comment_id 32 post_id 1
-  W-->>B: 200 评论成功（不等通知）
-  loop 常驻进程
-    K->>R: XAUTOCLAIM stream notifier worker 60000 0-0 COUNT 10
-    R-->>K: 没有需要接管的消息
-    K->>R: XREADGROUP GROUP notifier worker COUNT 10 BLOCK 5000 STREAMS stream >
-    R-->>K: [1793346685285-0 {comment_id: 32}]
-    K->>DB: SELECT comment + post
-    K->>R: LPUSH inbox:1 · LTRIM 0 49 · INCR unread:1
-    K->>R: XACK stream notifier 1793346685285-0
-  end
-  </pre></div>
-  <figcaption>图 3　Web 进程只多了一条 XADD；BLOCK 5000 让 worker 在没有消息时阻塞等待最多 5 秒，不会空转</figcaption>
+<svg class="dgm" viewBox="0 0 836.783 588" role="img" aria-label="评论通知的端到端流程">
+  <rect class="grp" x="12" y="250" width="812.783" height="308" rx="6"/>
+  <path class="life" d="M84 54 L84 582"/>
+  <path class="life" d="M234 54 L234 582"/>
+  <path class="life" d="M418.88 54 L418.88 582"/>
+  <path class="life" d="M568.88 54 L568.88 582"/>
+  <path class="life" d="M737.44 54 L737.44 582"/>
+  <rect class="bx-b" x="36" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-b" x="84" y="39" text-anchor="middle">读者</text>
+  <rect class="bx" x="186" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl" x="234" y="39" text-anchor="middle">Web 进程</text>
+  <rect class="bx-b" x="364.38" y="14" width="109" height="40" rx="8"/>
+  <text class="ttl on-b" x="418.88" y="39" text-anchor="middle">PostgreSQL</text>
+  <rect class="bx-r" x="520.88" y="14" width="96" height="40" rx="8"/>
+  <text class="ttl on-r" x="568.88" y="39" text-anchor="middle">Redis</text>
+  <rect class="bx-y" x="674.098" y="14" width="126.685" height="40" rx="8"/>
+  <text class="ttl on-y" x="737.44" y="39" text-anchor="middle">notify_worker</text>
+  <text class="lbl mono" x="159" y="76" text-anchor="middle">POST 评论</text>
+  <path class="ln" d="M89 82 L228 82" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="326.44" y="110" text-anchor="middle">INSERT comment（事务）</text>
+  <path class="ln-b" d="M239 116 L412.88 116" marker-end="url(#ar-b)"/>
+  <text class="lbl mono" x="326.44" y="144" text-anchor="middle">COMMIT</text>
+  <path class="ln-d" d="M413.88 150 L240 150" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="401.44" y="178" text-anchor="middle">on_commit → XADD</text>
+  <text class="lbl mono" x="401.44" y="194" text-anchor="middle">MAXLEN ~ 10000</text>
+  <path class="ln-y" d="M239 200 L562.88 200" marker-end="url(#ar-y)"/>
+  <text class="lbl" x="159" y="228" text-anchor="middle">200（不等通知）</text>
+  <path class="ln-d" d="M229 234 L90 234" marker-end="url(#ar)"/>
+  <rect class="grp-h" x="12" y="250" width="43.04" height="20" rx="4"/>
+  <text class="sm mono" x="33.52" y="264" text-anchor="middle">loop</text>
+  <text class="sm" x="63.04" y="264">常驻进程</text>
+  <text class="lbl mono" x="653.16" y="288" text-anchor="middle">XAUTOCLAIM …</text>
+  <text class="lbl mono" x="653.16" y="304" text-anchor="middle">60000 0-0 COUNT 10</text>
+  <path class="ln-y" d="M732.44 310 L574.88 310" marker-end="url(#ar-y)"/>
+  <text class="lbl" x="653.16" y="338" text-anchor="middle">没有要接管的</text>
+  <path class="ln-d" d="M573.88 344 L731.44 344" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="653.16" y="372" text-anchor="middle">XREADGROUP …</text>
+  <text class="lbl mono" x="653.16" y="388" text-anchor="middle">BLOCK 5000 … &gt;</text>
+  <path class="ln-y" d="M732.44 394 L574.88 394" marker-end="url(#ar-y)"/>
+  <text class="lbl" x="653.16" y="422" text-anchor="middle">{comment_id: 32}</text>
+  <path class="ln-d" d="M573.88 428 L731.44 428" marker-end="url(#ar)"/>
+  <text class="lbl mono" x="578.16" y="456" text-anchor="middle">SELECT comment + post</text>
+  <path class="ln-b" d="M732.44 462 L424.88 462" marker-end="url(#ar-b)"/>
+  <text class="lbl mono" x="653.16" y="490" text-anchor="middle">LPUSH · LTRIM</text>
+  <text class="lbl mono" x="653.16" y="506" text-anchor="middle">INCR unread:1</text>
+  <path class="ln-y" d="M732.44 512 L574.88 512" marker-end="url(#ar-y)"/>
+  <text class="lbl mono" x="653.16" y="540" text-anchor="middle">XACK … 285-0</text>
+  <path class="ln-y" d="M732.44 546 L574.88 546" marker-end="url(#ar-y)"/>
+</svg>
+<figcaption>图 12-3　Web 进程只多了一条 XADD；BLOCK 5000 让 worker 在没有消息时阻塞等待最多 5 秒，不会空转</figcaption>
 </figure>
 
-<div class="callout warn">
-  <span class="label">为什么要 transaction.on_commit</span>
+<div class="box warn">
+  <div class="t">&#9888; 为什么要 transaction.on_commit</div>
   <p>如果在 <code>post_save</code> 里直接 XADD，事件可能在数据库事务提交<strong>之前</strong>就被 worker 读到，worker 去查这条评论时查不到。<code>on_commit</code> 保证事务提交成功后才发事件；事务回滚的话也不会发。在 TestCase 中要用 <code>captureOnCommitCallbacks(execute=True)</code> 才能触发这些回调。</p>
 </div>
 
-<h2 id="cli"><span class="num">6</span>用 redis-cli 体验</h2>
-<pre class="cli"><code><span class="prompt">&gt; </span>XGROUP CREATE demo:s g1 0 MKSTREAM
-<span class="out">OK</span>
-<span class="prompt">&gt; </span>XADD demo:s * comment_id 1
-<span class="out">"1793346700000-0"</span>
-<span class="prompt">&gt; </span>XREADGROUP GROUP g1 alice COUNT 10 STREAMS demo:s &gt;
-<span class="out">1) 1) "demo:s"
+<h2 id="cli">用 redis-cli 体验</h2>
+<div class="code" data-lang="cli"><pre>&gt; XGROUP CREATE demo:s g1 0 MKSTREAM
+OK
+&gt; XADD demo:s * comment_id 1
+"1793346700000-0"
+&gt; XREADGROUP GROUP g1 alice COUNT 10 STREAMS demo:s &gt;
+1) 1) "demo:s"
    2) 1) 1) "1793346700000-0"
-         2) 1) "comment_id" 2) "1"</span>
-<span class="prompt">&gt; </span>XPENDING demo:s g1                <span class="cmt"># alice 读了但没 ACK</span>
-<span class="out">1) (integer) 1
+         2) 1) "comment_id" 2) "1"
+&gt; XPENDING demo:s g1                # alice 读了但没 ACK
+1) (integer) 1
 2) "1793346700000-0"
 3) "1793346700000-0"
-4) 1) 1) "alice" 2) "1"</span>
-<span class="prompt">&gt; </span>XAUTOCLAIM demo:s g1 bob 0 0-0    <span class="cmt"># bob 接管空闲超过 0ms 的消息</span>
-<span class="prompt">&gt; </span>XACK demo:s g1 1793346700000-0
-<span class="out">(integer) 1</span>
-<span class="prompt">&gt; </span>XINFO GROUPS demo:s
-<span class="prompt">&gt; </span>XRANGE demo:s - +                   <span class="cmt"># ACK 之后消息仍在 Stream 中，可以回溯</span></code></pre>
+4) 1) 1) "alice" 2) "1"
+&gt; XAUTOCLAIM demo:s g1 bob 0 0-0    # bob 接管空闲超过 0ms 的消息
+&gt; XACK demo:s g1 1793346700000-0
+(integer) 1
+&gt; XINFO GROUPS demo:s
+&gt; XRANGE demo:s - +                   # ACK 之后消息仍在 Stream 中，可以回溯</pre></div>
 
-<h2 id="code"><span class="num">7</span>代码实现</h2>
-<h3 id="code-produce">7.1 生产者</h3>
-<pre data-file="Chapter03/mysite/blog/signals.py"><code class="language-python" data-include="Chapter03/mysite/blog/signals.py::comment_created">@receiver(post_save, sender=Comment)
+<h2 id="code">代码实现</h2>
+<h3 id="code-produce">生产者</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/signals.py"><pre data-include="Chapter03/mysite/blog/signals.py::comment_created">@receiver(post_save, sender=Comment)
 def comment_created(sender, instance, created, **kwargs):
     if created and instance.active:
         # step-12 事务提交之后再发事件：否则 worker 可能比数据库提交还快，查不到这条评论
-        transaction.on_commit(lambda: notifications.publish_comment(instance))</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/notifications.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/notifications.py::publish_comment">def publish_comment(comment):
+        transaction.on_commit(lambda: notifications.publish_comment(instance))</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/notifications.py"><pre data-include="Chapter03/mysite/blog/services/notifications.py::publish_comment">def publish_comment(comment):
     get_redis().xadd(
         K.stream_comments(),
         {'comment_id': comment.id, 'post_id': comment.post_id},
         # 近似截断：只保留最近约 1 万条，避免 Stream 无限增长
         maxlen=STREAM_MAXLEN,
         approximate=True,
-    )</code></pre>
-<h3 id="code-consume">7.2 消费者</h3>
-<pre data-file="Chapter03/mysite/blog/services/notifications.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/notifications.py::ensure_group">def ensure_group():
+    )</pre></div>
+<h3 id="code-consume">消费者</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/notifications.py"><pre data-include="Chapter03/mysite/blog/services/notifications.py::ensure_group">def ensure_group():
     """创建消费组（已存在则忽略）。id='0' 表示从 Stream 的第一条消息开始消费。"""
     try:
         get_redis().xgroup_create(K.stream_comments(), GROUP, id='0', mkstream=True)
     except redis.ResponseError as exc:
         if 'BUSYGROUP' not in str(exc):
-            raise</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/notifications.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/notifications.py::process_batch">def process_batch(consumer, count=10, block_ms=5000):
+            raise</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/notifications.py"><pre data-include="Chapter03/mysite/blog/services/notifications.py::process_batch">def process_batch(consumer, count=10, block_ms=5000):
     """处理一批消息，返回处理的条数。"""
     r = get_redis()
     stream = K.stream_comments()
@@ -223,8 +286,8 @@ def comment_created(sender, instance, created, **kwargs):
             handle_event(fields)
         # 3. 处理完才 ACK；ACK 之前崩溃的话，消息还在待处理列表（PEL）中，会被重新处理
         r.xack(stream, GROUP, message_id)
-    return len(messages)</code></pre>
-<pre data-file="Chapter03/mysite/blog/services/notifications.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/notifications.py::handle_event">def handle_event(fields):
+    return len(messages)</pre></div>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/services/notifications.py"><pre data-include="Chapter03/mysite/blog/services/notifications.py::handle_event">def handle_event(fields):
     """处理一条评论事件：给文章作者发一条站内信。"""
     comment = (
         Comment.objects.select_related('post')
@@ -246,9 +309,9 @@ def comment_created(sender, instance, created, **kwargs):
     pipe.ltrim(K.user_inbox(post.author_id), 0, INBOX_SIZE - 1)
     pipe.incr(K.user_unread(post.author_id))
     pipe.execute()
-    return True</code></pre>
-<h3 id="code-worker">7.3 Worker 命令与部署</h3>
-<pre data-file="Chapter03/mysite/blog/management/commands/notify_worker.py"><code class="language-python" data-include="Chapter03/mysite/blog/management/commands/notify_worker.py::Command.handle">def handle(self, *args, consumer, once, **options):
+    return True</pre></div>
+<h3 id="code-worker">Worker 命令与部署</h3>
+<div class="code" data-lang="python" data-file="Chapter03/mysite/blog/management/commands/notify_worker.py"><pre data-include="Chapter03/mysite/blog/management/commands/notify_worker.py::Command.handle">def handle(self, *args, consumer, once, **options):
     notifications.ensure_group()
     self.stdout.write(f'notify_worker started as "{consumer}"')
     try:
@@ -259,8 +322,8 @@ def comment_created(sender, instance, created, **kwargs):
             if once:
                 break
     except KeyboardInterrupt:
-        self.stdout.write('bye')</code></pre>
-<pre data-file="Chapter03/docker-compose.yml"><code class="language-yaml">  web_worker:
+        self.stdout.write('bye')</pre></div>
+<div class="code" data-lang="yaml" data-file="Chapter03/docker-compose.yml"><pre>  web_worker:
     extends:
       service: web
     # step-12 后台消费评论事件，给作者发送站内信
@@ -269,35 +332,35 @@ def comment_created(sender, instance, created, **kwargs):
     depends_on:
       - db
       - redis
-      - web_migrate</code></pre>
+      - web_migrate</pre></div>
 
-<h2 id="lab"><span class="num">8</span>动手实验</h2>
+<h2 id="lab">动手实验</h2>
 <ol class="steps">
   <li>启动 worker：<code>docker compose up -d web_worker</code>，然后 <code>docker compose logs -f web_worker</code>。</li>
   <li>在一篇 alice 的文章下发表评论，worker 日志输出 <code>handled 1 event(s)</code>。</li>
   <li>用 alice 登录，侧边栏显示 <code>Notifications (1)</code>，点进去后未读数清零。</li>
   <li>
     <p>模拟崩溃：先停掉 worker，在 redis-cli 里以一个假的消费者读走消息但不 ACK，再启动 worker，60 秒后它会接管这条消息：</p>
-<pre class="cli"><code><span class="prompt">$ </span>docker compose stop web_worker
-<span class="cmt"># 发一条评论，然后：</span>
-<span class="prompt">&gt; </span>XREADGROUP GROUP notifier ghost COUNT 1 STREAMS blog:stream:comments &gt;
-<span class="prompt">&gt; </span>XPENDING blog:stream:comments notifier
-<span class="prompt">$ </span>docker compose start web_worker      <span class="cmt"># 约 60 秒后日志出现 handled 1 event(s)</span></code></pre>
+<div class="code" data-lang="cli"><pre>$ docker compose stop web_worker
+# 发一条评论，然后：
+&gt; XREADGROUP GROUP notifier ghost COUNT 1 STREAMS blog:stream:comments &gt;
+&gt; XPENDING blog:stream:comments notifier
+$ docker compose start web_worker      # 约 60 秒后日志出现 handled 1 event(s)</pre></div>
   </li>
   <li>不用 docker 时，可以用 <code>python manage.py notify_worker --once</code> 手动处理一批。</li>
 </ol>
 
-<h2 id="think"><span class="num">9</span>边界与思考</h2>
-<div class="callout warn">
-  <span class="label">本实现的取舍</span>
+<h2 id="think">边界与思考</h2>
+<div class="box warn">
+  <div class="t">&#9888; 本实现的取舍</div>
   <ul>
     <li><strong>至少一次，不是恰好一次</strong>：worker 在 LPUSH 之后、XACK 之前崩溃，消息会被重新处理，作者收到两条相同的通知。要做到幂等，可以用 <code>SET notified:{comment_id} 1 NX EX 86400</code> 去重（第 3 章的防刷技巧）。</li>
     <li><strong>一直失败的消息</strong>：如果某条消息每次处理都抛异常，会被不断接管、重试。XPENDING 返回的投递次数（delivery count）可以用来判断，超过 N 次就转移到「死信」Stream 并 ACK。</li>
     <li><strong>MAXLEN ~ 截断</strong>：如果 worker 停了很久，积压超过约 1 万条，最早的消息会在被消费前被截断。生产环境需要监控消费组的 <code>lag</code>。</li>
   </ul>
 </div>
-<div class="callout think">
-  <span class="label">思考题</span>
+<div class="exercise">
+  <h3>思考题</h3>
   <ol>
     <li>第 8 章的时间线推送是同步执行的。怎么改成：发布文章时 XADD 一个事件，由另一个消费组 <code>timeline-fanout</code> 完成推送？</li>
     <li>想加一个「有评论就发邮件给作者」的功能，是在 <code>notifier</code> 组里多做一件事，还是新建一个消费组？各有什么好处？</li>
@@ -305,51 +368,54 @@ def comment_created(sender, instance, created, **kwargs):
   </ol>
 </div>
 
-<h2 id="summary"><span class="num">10</span>全书回顾</h2>
+<h2 id="summary">全书回顾</h2>
 <figure>
-  <div class="diagram"><pre class="mermaid">
-mindmap
-  root((本项目中的 Redis))
-    STRING
-      浏览量 INCR
-      防刷 SET NX EX
-      缓存 / 分布式锁
-      固定窗口限流
-      未读数
-    HASH
-      签到统计
-    LIST
-      搜索历史
-      站内信
-    SET
-      点赞用户
-      关注 / 粉丝 / SINTER
-      标签倒排
-      已读
-    ZSET
-      排行榜 / ZUNIONSTORE
-      时间线 / 游标分页
-      兴趣画像 / 加权推荐
-      滑动窗口限流
-      字典序联想
-    BITMAP
-      签到日历 / BITOP
-    HyperLogLog
-      UV
-    STREAM
-      评论事件消费组
-    Lua
-      释放锁 / 限流
-  </pre></div>
-  <figcaption>图 4　十个功能用到的全部数据结构</figcaption>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="十个功能用到的全部数据结构">
+  <rect class="bx-g" x="10" y="10" width="236" height="96" rx="8"/>
+  <text class="ttl on-g" x="128" y="28" text-anchor="middle">STRING</text>
+  <text class="sm" x="128" y="46" text-anchor="middle">浏览量 INCR</text>
+  <text class="sm" x="128" y="63" text-anchor="middle">防刷 SET NX EX</text>
+  <text class="sm" x="128" y="80" text-anchor="middle">缓存 · 分布式锁</text>
+  <text class="sm" x="128" y="97" text-anchor="middle">固定窗口限流 · 未读数</text>
+  <rect class="bx-p" x="260" y="10" width="236" height="96" rx="8"/>
+  <text class="ttl on-p" x="378" y="45" text-anchor="middle">HASH</text>
+  <text class="sm" x="378" y="63" text-anchor="middle">签到统计</text>
+  <text class="sm" x="378" y="80" text-anchor="middle">连续天数 · 积分</text>
+  <rect class="bx-b" x="510" y="10" width="236" height="96" rx="8"/>
+  <text class="ttl on-b" x="628" y="45" text-anchor="middle">LIST</text>
+  <text class="sm" x="628" y="63" text-anchor="middle">搜索历史</text>
+  <text class="sm" x="628" y="80" text-anchor="middle">站内信收件箱</text>
+  <rect class="bx-a" x="10" y="116" width="236" height="96" rx="8"/>
+  <text class="ttl on-a" x="128" y="142.5" text-anchor="middle">SET</text>
+  <text class="sm" x="128" y="160.5" text-anchor="middle">点赞用户</text>
+  <text class="sm" x="128" y="177.5" text-anchor="middle">关注 · 粉丝 · SINTER</text>
+  <text class="sm" x="128" y="194.5" text-anchor="middle">标签倒排 · 已读</text>
+  <rect class="bx-r" x="260" y="116" width="236" height="96" rx="8"/>
+  <text class="ttl on-r" x="378" y="142.5" text-anchor="middle">ZSET</text>
+  <text class="sm" x="378" y="160.5" text-anchor="middle">排行榜 · 时间线</text>
+  <text class="sm" x="378" y="177.5" text-anchor="middle">兴趣画像 · 推荐</text>
+  <text class="sm" x="378" y="194.5" text-anchor="middle">滑动窗口 · 联想</text>
+  <rect class="bx-t" x="510" y="116" width="236" height="96" rx="8"/>
+  <text class="ttl on-t" x="628" y="151" text-anchor="middle">BITMAP</text>
+  <text class="sm" x="628" y="169" text-anchor="middle">签到日历</text>
+  <text class="sm" x="628" y="186" text-anchor="middle">BITOP 全勤统计</text>
+  <rect class="bx-p" x="10" y="222" width="236" height="96" rx="8"/>
+  <text class="ttl on-p" x="128" y="265.5" text-anchor="middle">HyperLogLog</text>
+  <text class="sm" x="128" y="283.5" text-anchor="middle">文章 UV</text>
+  <rect class="bx-y" x="260" y="222" width="236" height="96" rx="8"/>
+  <text class="ttl on-y" x="378" y="265.5" text-anchor="middle">STREAM</text>
+  <text class="sm" x="378" y="283.5" text-anchor="middle">评论事件消费组</text>
+  <rect class="bx" x="510" y="222" width="236" height="96" rx="8"/>
+  <text class="ttl" x="628" y="265.5" text-anchor="middle">Lua</text>
+  <text class="sm" x="628" y="283.5" text-anchor="middle">释放锁 · 限流</text>
+</svg>
+<figcaption>图 12-4　十个功能用到的全部数据结构</figcaption>
 </figure>
 
-<div class="pager">
-  <a href="11-search.html"><small>上一篇</small>← step-11 搜索增强</a>
-  <a class="next" href="../index.html"><small>回到</small>首页 →</a>
-</div>
+<nav id="pager"></nav>
 
 </main>
 </div>
+<script src="../assets/site.js"></script>
 </body>
 </html>
