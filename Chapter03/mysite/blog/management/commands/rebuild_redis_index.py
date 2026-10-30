@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from blog.services import recommend, timeline
+from blog.services import recommend, search, timeline
 
 
 class Command(BaseCommand):
@@ -11,4 +11,6 @@ class Command(BaseCommand):
         self.stdout.write('  step-08 author outboxes rebuilt')
         recommend.rebuild_index()
         self.stdout.write('  step-09 tag -> posts index rebuilt')
+        search.rebuild_suggest_index()
+        self.stdout.write('  step-11 title suggestion index rebuilt')
         self.stdout.write(self.style.SUCCESS('Done.'))

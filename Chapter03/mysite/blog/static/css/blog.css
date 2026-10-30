@@ -170,3 +170,18 @@ h3 a.more {
     padding:8px 12px;
     background:#e6f7ff;
 }
+
+/* search */
+.suggestions {
+    clear:both;
+    margin:0;
+    padding:0;
+    list-style:none;
+}
+.suggestions li {
+    padding:4px 0;
+}
+.search-extra {
+    clear:both;
+    padding-top:10px;
+}

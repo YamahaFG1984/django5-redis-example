@@ -292,6 +292,8 @@ def post_saved(sender, instance, **kwargs):
 
     # step-09 更新标签倒排索引（下线的文章会被移出）
     recommend.index_post(instance)
+    # step-11 更新标题联想索引（标题可能改过，旧的要删掉）
+    search.index_title(instance, getattr(instance, '_old', None))
 
     if instance.status == Post.Status.PUBLISHED:
         # step-08 推送到粉丝的时间线

@@ -6,7 +6,7 @@ from django.dispatch import receiver
 
 from .models import Comment, Post
 from .services import cache as cache_service
-from .services import likes, ranking, recommend, timeline
+from .services import likes, ranking, recommend, search, timeline
 
 
 @receiver(pre_save, sender=Post)
@@ -25,6 +25,8 @@ def post_saved(sender, instance, **kwargs):
 
     # step-09 更新标签倒排索引（下线的文章会被移出）
     recommend.index_post(instance)
+    # step-11 更新标题联想索引（标题可能改过，旧的要删掉）
+    search.index_title(instance, getattr(instance, '_old', None))
 
     if instance.status == Post.Status.PUBLISHED:
         # step-08 推送到粉丝的时间线
@@ -47,6 +49,8 @@ def post_deleted(sender, instance, **kwargs):
     timeline.unpublish(instance)
     # step-09 移出标签索引
     recommend.remove_post(instance.id)
+    # step-11 移出标题联想索引
+    search.remove_title(instance)
 
 
 @receiver(m2m_changed, sender=Post.tags.through)

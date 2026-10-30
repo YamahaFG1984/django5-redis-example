@@ -24,9 +24,55 @@
     <p><a href="{% url "blog:post_search" %}">Search again</a></p>
   {% else %}
     <h1>Search for posts</h1>
-    <form method="get">
+    <form method="get" autocomplete="off">
       {{ form.as_p }}
       <input type="submit" value="Search">
     </form>
+    <ul id="suggestions" class="suggestions"></ul>
   {% endif %}
+
+  <div class="search-extra">
+    {% if search_history %}
+      <h3>Your recent searches</h3>
+      <p>
+        {% for q in search_history %}
+          <a href="?query={{ q|urlencode }}">{{ q }}</a>{% if not forloop.last %} &middot; {% endif %}
+        {% endfor %}
+      </p>
+      <form class="inline-form" action="{% url "blog:search_history_clear" %}" method="post">
+        {% csrf_token %}
+        <input type="submit" value="Clear history">
+      </form>
+    {% endif %}
+    <h3>Trending searches</h3>
+    <ol>
+      {% for q, score in hot_searches %}
+        <li><a href="?query={{ q|urlencode }}">{{ q }}</a> <span class="score">{{ score }}</span></li>
+      {% empty %}
+        <li>Nothing yet.</li>
+      {% endfor %}
+    </ol>
+  </div>
+
+  <script>
+    // Redis: ask the server for titles starting with what the user typed
+    const input = document.getElementById('id_query');
+    const box = document.getElementById('suggestions');
+    if (input && box) {
+      input.addEventListener('input', async () => {
+        const q = input.value.trim();
+        box.innerHTML = '';
+        if (!q) return;
+        const res = await fetch('{% url "blog:search_suggest" %}?q=' + encodeURIComponent(q));
+        for (const item of await res.json()) {
+          const li = document.createElement('li');
+          const a = document.createElement('a');
+          a.href = item.url;
+          a.textContent = item.title;
+          li.appendChild(a);
+          box.appendChild(li);
+        }
+      });
+    }
+  </script>
 {% endblock %}

@@ -161,3 +161,19 @@ def ratelimit_fixed(scope, ident, window_index):
 def ratelimit_sliding(scope, ident):
     """ZSET  滑动窗口日志：member = 请求 ID，score = 请求时间（毫秒）"""
     return _k('ratelimit', 'sliding', scope, ident)
+
+
+# ---------------------------------------------------------------- step-11 搜索
+def search_hot():
+    """ZSET  热搜词：member = 规范化后的关键词，score = 搜索次数"""
+    return _k('search', 'hot')
+
+
+def search_history(visitor_id):
+    """LIST  访客最近的 10 条搜索，最新的在最左边，TTL 30 天"""
+    return _k('search', 'history', visitor_id)
+
+
+def search_suggest():
+    """ZSET  标题联想索引：score 全为 0，member = "小写标题|文章 ID"，按字典序排列"""
+    return _k('search', 'suggest')

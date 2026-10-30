@@ -8,7 +8,7 @@ from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db.models import Count
-from django.http import Http404
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
@@ -19,7 +19,15 @@ from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
-from .services import checkin, likes, pageviews, ranking, recommend, timeline
+from .services import (
+    checkin,
+    likes,
+    pageviews,
+    ranking,
+    recommend,
+    search,
+    timeline,
+)
 from .services.ratelimit import rate_limit
 from .visitors import get_visitor_id
 
@@ -209,6 +217,8 @@ def post_search(request):
         form = SearchForm(request.GET)
         if form.is_valid():
             query = form.cleaned_data['query']
+            # Redis: trending searches + this visitor's search history
+            search.record_search(get_visitor_id(request), query)
             results = (
                 Post.published.annotate(
                     similarity=TrigramSimilarity('title', query),
@@ -223,9 +233,25 @@ def post_search(request):
         {
             'form': form,
             'query': query,
-            'results': results
+            'results': results,
+            'hot_searches': search.hot_searches(),
+            'search_history': search.search_history(get_visitor_id(request)),
         },
     )
+
+
+def search_suggest(request):
+    posts = search.suggest(request.GET.get('q', ''))
+    return JsonResponse(
+        [{'title': p.title, 'url': p.get_absolute_url()} for p in posts],
+        safe=False,
+    )
+
+
+@require_POST
+def search_history_clear(request):
+    search.clear_history(get_visitor_id(request))
+    return redirect('blog:post_search')
 
 
 def post_ranking(request):

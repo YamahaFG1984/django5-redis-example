@@ -23,6 +23,12 @@ urlpatterns = [
     ),
     path('feed/', LatestPostsFeed(), name='post_feed'),
     path('search/', views.post_search, name='post_search'),
+    path('search/suggest/', views.search_suggest, name='search_suggest'),
+    path(
+        'search/history/clear/',
+        views.search_history_clear,
+        name='search_history_clear',
+    ),
     path('ranking/', views.post_ranking, name='post_ranking'),
     path('<int:post_id>/like/', views.post_like, name='post_like'),
     path('likes/', views.my_likes, name='my_likes'),

@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>热搜、搜索历史与联想</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 11 · 列表与字典序</div>
+  <h1>搜索增强：热搜榜、搜索历史、前缀联想</h1>
+  <p class="lead">给原书的搜索页加上三个常见功能：热搜榜（ZSET 计数）、个人最近搜索（LIST 加去重和截断），以及输入时的标题联想（利用 ZSET 在分数相同时按字典序排列的特性做前缀查询）。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-11-search</span>
+    <span class="t zset">ZSET</span><span class="t list">LIST</span>
+  </div>
+</section>
+
+<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>功能（PRD F9）</th><th>数据特点</th><th>结构</th><th>核心命令</th></tr></thead>
+  <tbody>
+    <tr><td>热搜榜前 10</td><td>按次数排序</td><td><span class="t zset">ZSET</span></td><td><code>ZINCRBY</code> <code>ZREVRANGE</code></td></tr>
+    <tr><td>我最近的 10 次搜索</td><td>按时间排序、去重、只保留最新 N 条</td><td><span class="t list">LIST</span></td><td><code>LREM</code> <code>LPUSH</code> <code>LTRIM</code></td></tr>
+    <tr><td>输入前缀，联想标题</td><td>按字符串前缀查找</td><td><span class="t zset">ZSET</span>（score 全为 0）</td><td><code>ZRANGEBYLEX</code></td></tr>
+  </tbody>
+</table></div>
+<p>这三个功能都不适合放在数据库里：热搜和历史是高频的小量写入；前缀查询虽然可以用 <code>LIKE 'redis%'</code> 加索引，但联想请求是每输入一个字符就发一次，量很大。</p>
+
+<h2 id="history"><span class="num">2</span>搜索历史：LIST 的「去重 + 置顶 + 截断」</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  S0["当前：[django, redis, cache]"] -->|"搜索 redis"| A["LREM key 0 redis<br/>[django, cache]"]
+  A --> B["LPUSH key redis<br/>[redis, django, cache]"]
+  B --> C["LTRIM key 0 9<br/>只保留前 10 个"]
+  C --> D["EXPIRE key 30 天"]
+  </pre></div>
+  <figcaption>图 1　四条命令放在一个 MULTI 里执行：重复搜索的词会移到最前面，列表长度不会超过 10</figcaption>
+</figure>
+<div class="keys">
+  <div class="rk">
+    <div class="rk-head"><span class="t list">LIST</span><code>blog:search:history:s:abc</code><span class="ttl">30d</span></div>
+    <div class="rk-body"><div class="list-cells"><span>redis</span><span>django</span><span>cache</span></div></div>
+    <div class="rk-note">左边是最新的。LRANGE 0 -1 读出全部。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:search:hot</code><span class="ttl">∞</span></div>
+    <div class="rk-body">
+      <div class="row"><span>redis</span><span class="score">42</span></div>
+      <div class="row"><span>django</span><span class="score">17</span></div>
+      <div class="row"><span>cache</span><span class="score">5</span></div>
+    </div>
+    <div class="rk-note">关键词先规范化：小写、合并空白。</div>
+  </div>
+</div>
+<div class="callout tip">
+  <span class="label">LREM 的复杂度</span>
+  <p><code>LREM</code> 是 O(N)，要遍历整个列表。因为有 LTRIM，列表长度始终不超过 10，所以没有问题。如果列表很长又需要去重，应该换成 ZSET（member = 关键词，score = 时间戳）。</p>
+</div>
+
+<h2 id="suggest"><span class="num">3</span>标题联想：ZRANGEBYLEX</h2>
+<h3 id="lex">3.1 原理</h3>
+<p>当 ZSET 中所有元素的 score 相同时，元素按 member 的<strong>字节序</strong>排列。这时就可以用 <code>ZRANGEBYLEX key [min [max</code> 按字符串范围查询。「以 redis str 开头」等价于「≥ <code>redis str</code> 且 ≤ <code>redis str</code> + 一个最大的字符」：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph Z["blog:search:suggest（score 全为 0，按字节序排列）"]
+    direction TB
+    m1["async views in django 5|10"]
+    m2["building a rest api with django|7"]
+    m3["django orm tips and tricks|3"]
+    m4["redis cluster notes|13"]
+    m5["redis streams as a message queue|9"]
+    m6["redis strings and atomic counters|2"]
+    m7["sorted sets for leaderboards|5"]
+    m1 --- m2 --- m3 --- m4 --- m5 --- m6 --- m7
+  end
+  Q["ZRANGEBYLEX suggest<br/>[redis str<br/>[redis str + U+10FFFF<br/>LIMIT 0 8"] -.命中区间.-> m5
+  Q -.-> m6
+  </pre></div>
+  <figcaption>图 2　前缀查询变成了有序列表上的一次区间查找，复杂度 O(log N + M)</figcaption>
+</figure>
+<p>member 的格式是 <code>小写标题|文章ID</code>：前半部分用于排序和匹配，后半部分用于取回文章。</p>
+
+<h3 id="maxchar">3.2 上界为什么用 U+10FFFF</h3>
+<p>常见的写法是用 <code>\xff</code> 作为上界。在 Python 中，<code>'\xff'</code> 是字符 ÿ，用 UTF-8 编码后是 <code>C3 BF</code> 两个字节。而中文字符的 UTF-8 编码以 <code>E4</code>~<code>E9</code> 开头，比 <code>C3</code> 大，所以 <code>redis 入门</code> 会排在上界 <code>redis ÿ</code> 之后，查不到。U+10FFFF 是 Unicode 的最大码点，编码为 <code>F4 8F BF BF</code>，比任何合法的 UTF-8 字符都大。测试 <code>test_non_ascii_titles</code> 覆盖了这个情况。</p>
+<div class="callout info">
+  <span class="label">另一种做法</span>
+  <p>如果 redis-py 不设置 <code>decode_responses</code>，可以直接用字节 <code>b'\xff'</code> 作为上界（0xFF 不会出现在合法的 UTF-8 中）。本项目统一用 str，所以选了 U+10FFFF。</p>
+</div>
+
+<h3 id="index">3.3 维护索引</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant A as Admin 修改标题
+  participant S as signals
+  participant R as Redis
+  A->>S: pre_save：取出修改前的文章 _old（第 5 章已经加了）
+  A->>S: post_save
+  S->>R: MULTI
+  S->>R: ZREM suggest "django orm tips|3"（旧标题）
+  S->>R: ZADD suggest 0 "async django|3"（新标题，仅已发布）
+  S->>R: EXEC
+  </pre></div>
+  <figcaption>图 3　标题改了，member 也就变了，所以要先删除旧的 member。这里复用了第 5 章 pre_save 中保存的 <code>_old</code></figcaption>
+</figure>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-11"># ---------------------------------------------------------------- step-11 搜索
+def search_hot():
+    """ZSET  热搜词：member = 规范化后的关键词，score = 搜索次数"""
+    return _k('search', 'hot')
+
+
+def search_history(visitor_id):
+    """LIST  访客最近的 10 条搜索，最新的在最左边，TTL 30 天"""
+    return _k('search', 'history', visitor_id)
+
+
+def search_suggest():
+    """ZSET  标题联想索引：score 全为 0，member = "小写标题|文章 ID"，按字典序排列"""
+    return _k('search', 'suggest')</code></pre>
+
+<h2 id="flow"><span class="num">4</span>完整交互</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant B as 浏览器
+  participant V as Django
+  participant R as Redis
+  B->>V: 输入 "re" → GET /blog/search/suggest/?q=re
+  V->>R: ZRANGEBYLEX suggest [re [re + U+10FFFF LIMIT 0 8
+  V-->>B: [{"title": "Redis Cluster Notes", ...}, ...]
+  B->>V: 提交 GET /blog/search/?query=Redis
+  V->>R: MULTI · ZINCRBY hot 1 redis · LREM/LPUSH/LTRIM/EXPIRE history · EXEC
+  V->>V: PostgreSQL 三元组相似度搜索（原书逻辑不变）
+  V->>R: ZREVRANGE hot 0 9 WITHSCORES · LRANGE history 0 -1
+  V-->>B: 结果 + 最近搜索 + 热搜榜
+  </pre></div>
+  <figcaption>图 4　Redis 只负责联想、热搜和历史，真正的全文搜索仍然由 PostgreSQL 完成</figcaption>
+</figure>
+
+<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
+<pre class="cli"><code><span class="prompt">&gt; </span>RPUSH demo:h django cache
+<span class="prompt">&gt; </span>LREM demo:h 0 redis
+<span class="out">(integer) 0</span>
+<span class="prompt">&gt; </span>LPUSH demo:h redis
+<span class="prompt">&gt; </span>LTRIM demo:h 0 1
+<span class="prompt">&gt; </span>LRANGE demo:h 0 -1
+<span class="out">1) "redis" 2) "django"</span>
+<span class="prompt">&gt; </span>ZADD demo:s 0 "redis streams|9" 0 "redis strings|2" 0 "redis cluster|13" 0 "django orm|3"
+<span class="prompt">&gt; </span>ZRANGEBYLEX demo:s "[redis str" "[redis str\xff"
+<span class="out">1) "redis streams|9"
+2) "redis strings|2"</span>
+<span class="prompt">&gt; </span>ZRANGEBYLEX demo:s - + LIMIT 0 2        <span class="cmt"># - 和 + 表示最小值和最大值</span>
+<span class="out">1) "django orm|3"
+2) "redis cluster|13"</span>
+<span class="prompt">&gt; </span>ZLEXCOUNT demo:s "[redis" "(redit"      <span class="cmt"># 以 redis 开头的有几个（另一种写上界的方法）</span>
+<span class="out">(integer) 3</span></code></pre>
+<p>注：redis-cli 中双引号里的 <code>\xff</code> 会被解析成字节 0xFF，所以这里能正常工作。</p>
+
+<h2 id="code"><span class="num">6</span>代码实现</h2>
+<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::record_search">def record_search(visitor_id, query):
+    q = normalize(query)
+    if not q:
+        return
+    history = K.search_history(visitor_id)
+    pipe = get_redis().pipeline()
+    pipe.zincrby(K.search_hot(), 1, q)
+    pipe.lrem(history, 0, q)              # 先删掉旧的同名记录（去重）
+    pipe.lpush(history, q)                # 插到最前面
+    pipe.ltrim(history, 0, HISTORY_SIZE - 1)  # 只保留最近 10 条
+    pipe.expire(history, HISTORY_TTL)
+    pipe.execute()</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::index_title">def index_title(post, old=None):
+    """文章保存时维护联想索引。old 是修改前的文章（标题可能变了）。"""
+    pipe = get_redis().pipeline()
+    if old is not None:
+        pipe.zrem(K.search_suggest(), _member(old))
+    if post.status == Post.Status.PUBLISHED:
+        pipe.zadd(K.search_suggest(), {_member(post): 0})
+    else:
+        pipe.zrem(K.search_suggest(), _member(post))
+    pipe.execute()</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/search.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/search.py::suggest">def suggest(prefix, limit=SUGGEST_LIMIT):
+    """返回标题以 prefix 开头的已发布文章。"""
+    p = normalize(prefix)
+    if not p:
+        return []
+    # 所有 score 相同时，ZSET 按 member 的字节序排列，[ 表示闭区间
+    members = get_redis().zrangebylex(
+        K.search_suggest(), f'[{p}', f'[{p}{MAX_CHAR}', start=0, num=limit
+    )
+    ids = [int(m.rsplit(SEP, 1)[1]) for m in members]
+    posts = Post.published.in_bulk(ids)
+    return [posts[i] for i in ids if i in posts]</code></pre>
+<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-python" data-include="Chapter03/mysite/blog/views.py::search_suggest">def search_suggest(request):
+    posts = search.suggest(request.GET.get('q', ''))
+    return JsonResponse(
+        [{'title': p.title, 'url': p.get_absolute_url()} for p in posts],
+        safe=False,
+    )</code></pre>
+
+<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<ol class="steps">
+  <li>执行 <code>python manage.py rebuild_redis_index</code>，为已有文章建立联想索引。</li>
+  <li>打开 <code>/blog/search/</code>，在输入框中输入 <code>re</code>、<code>redis s</code>、<code>dj</code>，观察下方的联想结果。</li>
+  <li>分别搜索 <code>Redis</code>、<code>redis</code>、<code>Django</code>，回到搜索页，查看「最近搜索」和「热搜」。</li>
+  <li>
+    <p>在 redis-cli 中：</p>
+<pre class="cli"><code><span class="prompt">&gt; </span>ZRANGE blog:search:suggest 0 -1
+<span class="prompt">&gt; </span>ZREVRANGE blog:search:hot 0 9 WITHSCORES
+<span class="prompt">&gt; </span>LRANGE blog:search:history:s:&lt;sessionid&gt; 0 -1</code></pre>
+  </li>
+  <li>在 Admin 中修改一篇文章的标题，再测试联想，旧标题已经搜不到了。</li>
+</ol>
+
+<h2 id="think"><span class="num">8</span>边界与思考</h2>
+<div class="callout warn">
+  <span class="label">本实现的取舍</span>
+  <ul>
+    <li><strong>只能匹配开头</strong>：输入 <code>orm</code> 找不到 <code>Django ORM Tips</code>。可以把标题的每个单词开头都作为一个 member 加进去（<code>orm tips|3</code>、<code>tips|3</code>），代价是索引变大。</li>
+    <li><strong>热搜没有过滤</strong>：任何人都能刷热搜词。实际应用中要配合限流（第 10 章）和敏感词过滤，也可以只统计有搜索结果的词。</li>
+    <li><strong>热搜没有时间维度</strong>：可以参照第 4 章，按天拆 Key，再用 ZUNIONSTORE 合并出「近 7 天热搜」。</li>
+  </ul>
+</div>
+<div class="callout think">
+  <span class="label">思考题</span>
+  <ol>
+    <li>想让联想结果按热度排序而不是按字母顺序，ZRANGEBYLEX 还能用吗？（提示：先按前缀取出候选，再按文章的热度重新排序）</li>
+    <li>如果要支持拼音联想（输入 <code>rm</code> 联想到「入门」），索引应该怎么设计？</li>
+    <li>匿名访客登录后，怎么把 <code>s:xxx</code> 的搜索历史合并到 <code>u:3</code>？</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="10-rate-limit.html"><small>上一篇</small>← step-10 接口限流</a>
+  <a class="next" href="12-notifications.html"><small>下一篇</small>step-12 评论通知 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>
