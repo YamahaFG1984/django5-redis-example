@@ -116,3 +116,22 @@ p.stats {
     color:#999;
     font-size:13px;
 }
+
+/* rankings */
+h3 a.more {
+    font-size:12px;
+    font-weight:normal;
+}
+.score {
+    color:#999;
+    font-size:12px;
+}
+.boards {
+    display:flex;
+    gap:20px;
+    flex-wrap:wrap;
+}
+.boards .board {
+    flex:1;
+    min-width:200px;
+}

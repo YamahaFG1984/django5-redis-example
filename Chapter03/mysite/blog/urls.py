@@ -23,4 +23,5 @@ urlpatterns = [
     ),
     path('feed/', LatestPostsFeed(), name='post_feed'),
     path('search/', views.post_search, name='post_search'),
+    path('ranking/', views.post_ranking, name='post_ranking'),
 ]

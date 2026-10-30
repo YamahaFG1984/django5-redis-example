@@ -4,6 +4,7 @@ from django.db.models import Count
 from django.utils.safestring import mark_safe
 
 from ..models import Post
+from ..services import ranking
 
 register = template.Library()
 
@@ -24,6 +25,11 @@ def get_most_commented_posts(count=5):
     return Post.published.annotate(
         total_comments=Count('comments')
     ).order_by('-total_comments')[:count]
+
+
+@register.simple_tag
+def get_hot_posts(period='week', count=5):
+    return ranking.top_posts(period, count)
 
 
 @register.filter(name='markdown')

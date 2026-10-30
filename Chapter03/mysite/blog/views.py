@@ -9,7 +9,7 @@ from taggit.models import Tag
 
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
-from .services import pageviews
+from .services import pageviews, ranking
 from .visitors import get_visitor_id
 
 
@@ -54,7 +54,9 @@ def post_detail(request, year, month, day, post):
 
     # Redis: count this view (deduplicated per visitor)
     visitor_id = get_visitor_id(request)
-    pageviews.record_view(post, visitor_id)
+    if pageviews.record_view(post, visitor_id):
+        # Redis: only counted views raise the post in the rankings
+        ranking.record_view(post.id)
 
     # List of active comments for this post
     comments = post.comments.filter(active=True)
@@ -196,3 +198,12 @@ def post_search(request):
             'results': results
         },
     )
+
+
+def post_ranking(request):
+    boards = [
+        ('Today', ranking.top_posts('day')),
+        ('Last 7 days', ranking.top_posts('week')),
+        ('All time', ranking.top_posts('total')),
+    ]
+    return render(request, 'blog/post/ranking.html', {'boards': boards})

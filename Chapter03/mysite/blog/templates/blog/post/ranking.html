@@ -1,0 +1,24 @@
+{% extends "blog/base.html" %}
+
+{% block title %}Hot posts{% endblock %}
+
+{% block content %}
+  <h1>Hot posts</h1>
+  <div class="boards">
+    {% for name, posts in boards %}
+      <div class="board">
+        <h2>{{ name }}</h2>
+        <ol>
+          {% for post in posts %}
+            <li>
+              <a href="{{ post.get_absolute_url }}">{{ post.title }}</a>
+              <span class="score">{{ post.score }} view{{ post.score|pluralize }}</span>
+            </li>
+          {% empty %}
+            <li>No data yet.</li>
+          {% endfor %}
+        </ol>
+      </div>
+    {% endfor %}
+  </div>
+{% endblock %}

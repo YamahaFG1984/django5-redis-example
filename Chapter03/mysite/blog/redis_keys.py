@@ -31,3 +31,19 @@ def post_seen(post_id, visitor_id):
 def post_views_dirty():
     """SET  浏览量有变化、等待回写数据库的文章 ID"""
     return _k('post', 'views', 'dirty')
+
+
+# ---------------------------------------------------------------- step-04 排行榜
+def rank_total():
+    """ZSET  总榜：member = 文章 ID，score = 浏览次数"""
+    return _k('rank', 'views', 'total')
+
+
+def rank_daily(day):
+    """ZSET  日榜，TTL 8 天"""
+    return _k('rank', 'views', 'day', day.strftime('%Y%m%d'))
+
+
+def rank_weekly(day):
+    """ZSET  截止到 day 的 7 天榜（7 个日榜的并集），缓存 5 分钟"""
+    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))

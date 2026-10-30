@@ -151,7 +151,7 @@ flowchart LR
     <div class="rk-note">浏览量有变化的文章，等待回写数据库。</div>
   </div>
 </div>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::L15-33"># ---------------------------------------------------------------- step-03 浏览量
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-03"># ---------------------------------------------------------------- step-03 浏览量
 def post_views(post_id):
     """STRING  文章 PV 计数"""
     return _k('post', post_id, 'views')

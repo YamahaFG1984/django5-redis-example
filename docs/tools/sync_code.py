@@ -6,12 +6,13 @@
 
 在 HTML 中这样声明要嵌入的代码：
     <code class="language-python"
-          data-include="Chapter03/mysite/blog/services/pageviews.py::PageViewService.record"></code>
+          data-include="Chapter03/mysite/blog/services/pageviews.py::record_view"></code>
 
-data-include 支持三种写法：
+data-include 支持四种写法：
     path                      -> 整个文件
     path::函数名 / 类名.方法名  -> 用 ast 定位到这个函数或类（含装饰器）
     path::L10-30              -> 第 10~30 行
+    path::#step-04            -> 从包含 "# ---- step-04" 的分隔注释开始，到下一个分隔注释为止
 """
 import ast
 import html
@@ -50,7 +51,14 @@ def extract(spec):
     lines = source.splitlines()
     if not selector:
         return source.rstrip('\n')
-    if re.fullmatch(r'L\d+-\d+', selector):
+    if selector.startswith('#'):
+        marks = [i for i, line in enumerate(lines, 1) if line.startswith('# ---')]
+        start = next(i for i in marks if selector[1:] in lines[i - 1])
+        later = [i for i in marks if i > start]
+        end = (later[0] - 1) if later else len(lines)
+        while not lines[end - 1].strip():
+            end -= 1
+    elif re.fullmatch(r'L\d+-\d+', selector):
         start, end = map(int, selector[1:].split('-'))
     else:
         node = find_symbol(ast.parse(source), selector)
