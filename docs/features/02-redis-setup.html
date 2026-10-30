@@ -158,7 +158,7 @@ def _on_setting_changed(setting, **kwargs):
 </div>
 
 <h2 id="keys"><span class="num">4</span>Key 规范：<code>redis_keys.py</code></h2>
-<pre data-file="Chapter03/mysite/blog/redis_keys.py"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py">"""
+<pre data-file="Chapter03/mysite/blog/redis_keys.py"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::L1-12">"""
 所有 Redis Key 的唯一出处。
 
 命名规则：{前缀}:{实体}:{ID}:{属性}，例如 blog:post:42:views
@@ -169,79 +169,7 @@ from django.conf import settings
 
 
 def _k(*parts):
-    return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])
-
-
-# ---------------------------------------------------------------- step-03 浏览量
-def post_views(post_id):
-    """STRING  文章 PV 计数"""
-    return _k('post', post_id, 'views')
-
-
-def post_uv(post_id):
-    """HYPERLOGLOG  文章 UV（独立访客数）"""
-    return _k('post', post_id, 'uv')
-
-
-def post_seen(post_id, visitor_id):
-    """STRING  防刷标记：某访客最近看过某文章，TTL 30 分钟"""
-    return _k('post', post_id, 'seen', visitor_id)
-
-
-def post_views_dirty():
-    """SET  浏览量有变化、等待回写数据库的文章 ID"""
-    return _k('post', 'views', 'dirty')
-
-
-# ---------------------------------------------------------------- step-04 排行榜
-def rank_total():
-    """ZSET  总榜：member = 文章 ID，score = 浏览次数"""
-    return _k('rank', 'views', 'total')
-
-
-def rank_daily(day):
-    """ZSET  日榜，TTL 8 天"""
-    return _k('rank', 'views', 'day', day.strftime('%Y%m%d'))
-
-
-def rank_weekly(day):
-    """ZSET  截止到 day 的 7 天榜（7 个日榜的并集），缓存 5 分钟"""
-    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))
-
-
-# ---------------------------------------------------------------- step-05 缓存
-def lock(name):
-    """STRING  分布式锁，value = 持有者的随机 token，TTL 10 秒"""
-    return _k('lock', name)
-
-
-# 下面是 Django 缓存框架使用的 Key（存在 db1，框架会自动加上 "cache:1:" 前缀）
-def cache_post_detail(year, month, day, slug):
-    return f'post:detail:{year}-{month}-{day}:{slug}'
-
-
-def cache_post_similar(post_id):
-    return f'post:{post_id}:similar'
-
-
-def cache_sidebar_ns():
-    """侧边栏缓存的命名空间版本号，加 1 即可让所有侧边栏缓存失效"""
-    return 'sidebar:ns'
-
-
-def cache_sidebar(ns, name):
-    return f'sidebar:{ns}:{name}'
-
-
-# ---------------------------------------------------------------- step-06 点赞
-def post_likers(post_id):
-    """SET  给这篇文章点过赞的用户 ID"""
-    return _k('post', post_id, 'likers')
-
-
-def user_likes(user_id):
-    """ZSET  用户点赞过的文章：member = 文章 ID，score = 点赞时间戳"""
-    return _k('user', user_id, 'likes')</code></pre>
+    return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])</code></pre>
 <p>这一章只有一个辅助函数 <code>_k()</code>。从下一章开始，每个功能都会在这里添加自己的 Key 函数，例如：</p>
 <pre><code class="language-python">def post_views(post_id):          # step-03
     return _k('post', post_id, 'views')      # blog:post:42:views
