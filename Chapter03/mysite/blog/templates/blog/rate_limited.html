@@ -1,0 +1,8 @@
+{% extends "blog/base.html" %}
+
+{% block title %}Too many requests{% endblock %}
+
+{% block content %}
+  <h1>Slow down a little</h1>
+  <p>You are doing that too often. Please try again in {{ retry_after }} second{{ retry_after|pluralize }}.</p>
+{% endblock %}

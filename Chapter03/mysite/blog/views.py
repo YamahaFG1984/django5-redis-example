@@ -20,6 +20,7 @@ from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
 from .services import checkin, likes, pageviews, ranking, recommend, timeline
+from .services.ratelimit import rate_limit
 from .visitors import get_visitor_id
 
 
@@ -120,6 +121,8 @@ class PostListView(ListView):
     template_name = 'blog/post/list.html'
 
 
+# Redis: at most 5 share emails per IP per hour (fixed window)
+@rate_limit('share', limit=5, window=3600, algorithm='fixed')
 def post_share(request, post_id):
     # Retrieve post by id
     post = get_object_or_404(
@@ -168,6 +171,8 @@ def post_share(request, post_id):
 
 
 @require_POST
+# Redis: at most 3 comments per IP per minute (sliding window)
+@rate_limit('comment', limit=3, window=60, algorithm='sliding')
 def post_comment(request, post_id):
     post = get_object_or_404(
         Post,

@@ -150,3 +150,14 @@ def visitor_read(visitor_id):
 def recommend_result(visitor_id):
     """ZSET  推荐结果缓存：member = 文章 ID，score = 推荐分，TTL 60 秒"""
     return _k('recommend', visitor_id)
+
+
+# ---------------------------------------------------------------- step-10 限流
+def ratelimit_fixed(scope, ident, window_index):
+    """STRING  固定窗口计数：第 window_index 个窗口内的请求数，TTL = 窗口长度"""
+    return _k('ratelimit', 'fixed', scope, ident, window_index)
+
+
+def ratelimit_sliding(scope, ident):
+    """ZSET  滑动窗口日志：member = 请求 ID，score = 请求时间（毫秒）"""
+    return _k('ratelimit', 'sliding', scope, ident)
