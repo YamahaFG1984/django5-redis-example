@@ -150,3 +150,17 @@ LOGOUT_REDIRECT_URL = 'blog:post_list'
 REDIS_URL = config('REDIS_URL', default='redis://localhost:6379/0')
 # 本项目创建的所有 Key 都以这个前缀开头
 REDIS_KEY_PREFIX = 'blog'
+
+# Django 缓存框架使用 db1，和业务数据分开：cache.clear() 执行的是 FLUSHDB
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': config(
+            'REDIS_CACHE_URL',
+            # 默认：和 REDIS_URL 同一个 Redis，换成 db1
+            default=REDIS_URL.rsplit('/', 1)[0] + '/1',
+        ),
+        'KEY_PREFIX': 'cache',
+        'TIMEOUT': 300,
+    }
+}

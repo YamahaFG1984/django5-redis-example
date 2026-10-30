@@ -1,14 +1,18 @@
 from django.contrib.postgres.search import TrigramSimilarity
+from django.core.cache import cache
 from django.core.mail import send_mail
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db.models import Count
+from django.http import Http404
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_POST
 from django.views.generic import ListView
 from taggit.models import Tag
 
+from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
+from .services import cache as cache_service
 from .services import pageviews, ranking
 from .visitors import get_visitor_id
 
@@ -43,14 +47,10 @@ def post_list(request, tag_slug=None):
 
 
 def post_detail(request, year, month, day, post):
-    post = get_object_or_404(
-        Post,
-        status=Post.Status.PUBLISHED,
-        slug=post,
-        publish__year=year,
-        publish__month=month,
-        publish__day=day,
-    )
+    # Redis: cache-aside lookup (also caches "not found")
+    post = cache_service.get_published_post(year, month, day, post)
+    if post is None:
+        raise Http404('No Post matches the given query.')
 
     # Redis: count this view (deduplicated per visitor)
     visitor_id = get_visitor_id(request)
@@ -63,14 +63,12 @@ def post_detail(request, year, month, day, post):
     # Form for users to comment
     form = CommentForm()
 
-    # List of similar posts
-    post_tags_ids = post.tags.values_list('id', flat=True)
-    similar_posts = Post.published.filter(
-        tags__in=post_tags_ids
-    ).exclude(id=post.id)
-    similar_posts = similar_posts.annotate(
-        same_tags=Count('tags')
-    ).order_by('-same_tags', '-publish')[:4]
+    # List of similar posts (cached for 10 minutes)
+    similar_posts = cache.get_or_set(
+        redis_keys.cache_post_similar(post.id),
+        lambda: list(_similar_posts(post)),
+        cache_service.jitter(600),
+    )
 
     return render(
         request,
@@ -84,6 +82,16 @@ def post_detail(request, year, month, day, post):
             'unique_visitors': pageviews.get_uv(post),
         },
     )
+
+
+def _similar_posts(post):
+    post_tags_ids = post.tags.values_list('id', flat=True)
+    similar_posts = Post.published.filter(
+        tags__in=post_tags_ids
+    ).exclude(id=post.id)
+    return similar_posts.annotate(
+        same_tags=Count('tags')
+    ).order_by('-same_tags', '-publish')[:4]
 
 
 class PostListView(ListView):

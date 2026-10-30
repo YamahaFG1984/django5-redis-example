@@ -10,6 +10,7 @@ services:
       DB_PASSWORD: 'postgres'
       DB_NAME: 'postgres'
       REDIS_URL: 'redis://redis:6379/0'
+      REDIS_CACHE_URL: 'redis://redis:6379/1'
     volumes:
       - .:/code
   web_migrate:

@@ -47,3 +47,27 @@ def rank_daily(day):
 def rank_weekly(day):
     """ZSET  截止到 day 的 7 天榜（7 个日榜的并集），缓存 5 分钟"""
     return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))
+
+
+# ---------------------------------------------------------------- step-05 缓存
+def lock(name):
+    """STRING  分布式锁，value = 持有者的随机 token，TTL 10 秒"""
+    return _k('lock', name)
+
+
+# 下面是 Django 缓存框架使用的 Key（存在 db1，框架会自动加上 "cache:1:" 前缀）
+def cache_post_detail(year, month, day, slug):
+    return f'post:detail:{year}-{month}-{day}:{slug}'
+
+
+def cache_post_similar(post_id):
+    return f'post:{post_id}:similar'
+
+
+def cache_sidebar_ns():
+    """侧边栏缓存的命名空间版本号，加 1 即可让所有侧边栏缓存失效"""
+    return 'sidebar:ns'
+
+
+def cache_sidebar(ns, name):
+    return f'sidebar:{ns}:{name}'

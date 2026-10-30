@@ -206,7 +206,31 @@ def rank_daily(day):
 
 def rank_weekly(day):
     """ZSET  截止到 day 的 7 天榜（7 个日榜的并集），缓存 5 分钟"""
-    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))</code></pre>
+    return _k('rank', 'views', 'week', day.strftime('%Y%m%d'))
+
+
+# ---------------------------------------------------------------- step-05 缓存
+def lock(name):
+    """STRING  分布式锁，value = 持有者的随机 token，TTL 10 秒"""
+    return _k('lock', name)
+
+
+# 下面是 Django 缓存框架使用的 Key（存在 db1，框架会自动加上 "cache:1:" 前缀）
+def cache_post_detail(year, month, day, slug):
+    return f'post:detail:{year}-{month}-{day}:{slug}'
+
+
+def cache_post_similar(post_id):
+    return f'post:{post_id}:similar'
+
+
+def cache_sidebar_ns():
+    """侧边栏缓存的命名空间版本号，加 1 即可让所有侧边栏缓存失效"""
+    return 'sidebar:ns'
+
+
+def cache_sidebar(ns, name):
+    return f'sidebar:{ns}:{name}'</code></pre>
 <p>这一章只有一个辅助函数 <code>_k()</code>。从下一章开始，每个功能都会在这里添加自己的 Key 函数，例如：</p>
 <pre><code class="language-python">def post_views(post_id):          # step-03
     return _k('post', post_id, 'views')      # blog:post:42:views
@@ -240,6 +264,7 @@ flowchart LR
 <pre data-file="Chapter03/mysite/blog/tests/base.py"><code class="language-python" data-include="Chapter03/mysite/blog/tests/base.py">from urllib.parse import urlparse, urlunparse
 
 from django.conf import settings
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 
 from blog.redis_client import get_redis
@@ -251,20 +276,28 @@ def _with_db(url, db):
 
 
 TEST_REDIS_URL = _with_db(settings.REDIS_URL, 15)
+TEST_CACHES = {
+    'default': {
+        **settings.CACHES['default'],
+        'LOCATION': _with_db(settings.CACHES['default']['LOCATION'], 14),
+    }
+}
 
 
-@override_settings(REDIS_URL=TEST_REDIS_URL)
+@override_settings(REDIS_URL=TEST_REDIS_URL, CACHES=TEST_CACHES)
 class RedisTestCase(TestCase):
     """
     连接真实 Redis 的测试基类。
 
-    使用 db15，避免误删开发数据；每个用例开始前清空，保证用例之间互不影响。
+    业务数据用 db15、缓存用 db14，避免误删开发数据；
+    每个用例开始前清空，保证用例之间互不影响。
     """
 
     def setUp(self):
         super().setUp()
         self.redis = get_redis()
         self.redis.flushdb()
+        cache.clear()
 
 
 def make_user(username='alice'):
