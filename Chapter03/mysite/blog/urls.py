@@ -27,4 +27,11 @@ urlpatterns = [
     path('<int:post_id>/like/', views.post_like, name='post_like'),
     path('likes/', views.my_likes, name='my_likes'),
     path('checkin/', views.daily_checkin, name='daily_checkin'),
+    path('author/<str:username>/', views.author_detail, name='author_detail'),
+    path(
+        'author/<str:username>/follow/',
+        views.author_follow,
+        name='author_follow',
+    ),
+    path('timeline/', views.my_timeline, name='my_timeline'),
 ]

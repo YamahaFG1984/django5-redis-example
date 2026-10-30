@@ -103,3 +103,24 @@ def checkin_full_week(day):
 def user_checkin_stats(user_id):
     """HASH  签到统计：total_days / streak / last_date / points"""
     return _k('user', user_id, 'checkin')
+
+
+# ---------------------------------------------------------------- step-08 关注与时间线
+def user_following(user_id):
+    """SET  我关注的人"""
+    return _k('user', user_id, 'following')
+
+
+def user_followers(user_id):
+    """SET  关注我的人（粉丝）"""
+    return _k('user', user_id, 'followers')
+
+
+def user_posts(user_id):
+    """ZSET  作者的发件箱：member = 文章 ID，score = 发布时间戳"""
+    return _k('user', user_id, 'posts')
+
+
+def timeline(user_id):
+    """ZSET  用户的收件箱（时间线），最多保留 500 条"""
+    return _k('timeline', user_id)

@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>关注与时间线</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 08 · Feed 流</div>
+  <h1>关注与时间线：写扩散 Feed 流与游标分页</h1>
+  <p class="lead">关注作者后，在「我的时间线」里按时间看到他们的新文章，这就是 Feed 流。这一章用 SET 存关注关系（还可以求交集得到共同关注），用 ZSET 做发件箱和收件箱，实现推模式，再用分数游标解决翻页时数据重复的问题。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-08-follow-timeline</span>
+    <span class="t set">SET</span><span class="t zset">ZSET</span>
+  </div>
+</section>
+
+<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<p>PRD F6：关注 / 取消关注作者；作者发布文章后，粉丝的时间线里立刻出现；新关注时补上作者最近的文章，取消关注后移除；翻页时有新文章发布也不重复、不遗漏；显示共同关注。</p>
+<p>用 SQL 读时间线是这样的：</p>
+<pre><code class="language-sql">SELECT * FROM blog_post
+WHERE author_id IN (SELECT followee_id FROM follows WHERE follower_id = 3)
+  AND status = 'PB'
+ORDER BY publish DESC LIMIT 10 OFFSET 20;</code></pre>
+<p>关注的人越多，<code>IN</code> 子查询越大；每次刷新时间线都要执行一遍排序。Feed 流有两种基本思路，选择取决于读写比例。</p>
+
+<h2 id="push-pull"><span class="num">2</span>推模式还是拉模式</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph PULL["拉模式（读扩散）"]
+    direction TB
+    RA["读者打开时间线"] --> OA["读 alice 发件箱"] & OB["读 bob 发件箱"] & OC["读 carol 发件箱"]
+    OA & OB & OC --> M["合并排序，取前 10"]
+  end
+  subgraph PUSH["推模式（写扩散）✓ 本项目"]
+    direction TB
+    AP["alice 发布文章"] --> OX["写 alice 发件箱"]
+    OX --> I1["写 bob 收件箱"] & I2["写 carol 收件箱"] & I3["写 dave 收件箱"]
+    RB["bob 打开时间线"] --> I1
+  end
+  </pre></div>
+  <figcaption>图 1　拉模式在读的时候合并；推模式在写的时候复制，读的时候只读一个 Key</figcaption>
+</figure>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>拉模式（读扩散）</th><th>推模式（写扩散）</th><th>推拉结合</th></tr></thead>
+  <tbody>
+    <tr><td>发布成本</td><td>O(1)</td><td>O(粉丝数)</td><td>普通作者推，大 V 不推</td></tr>
+    <tr><td>读取成本</td><td>O(关注数 × log)</td><td><strong>O(log N)，读一个 ZSET</strong></td><td>读收件箱 + 拉大 V 发件箱</td></tr>
+    <tr><td>存储</td><td>只存一份</td><td>每个粉丝存一份 ID</td><td>介于两者之间</td></tr>
+    <tr><td>适合</td><td>关注数少、粉丝很多</td><td><strong>读多写少，粉丝数可控</strong></td><td>微博、Twitter 这类大型社区</td></tr>
+  </tbody>
+</table></div>
+<p>博客是典型的读多写少，作者的粉丝数也不会太大，所以选择推模式。收件箱只存文章 ID，内容按 ID 从数据库批量读取。</p>
+
+<h2 id="keys"><span class="num">3</span>Key 设计</h2>
+<div class="keys">
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:user:3:following</code><span class="ttl">∞</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">1 alice</span><span class="chip">2 bob</span></div></div>
+    <div class="rk-note">carol（ID 3）关注的人。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:user:1:followers</code><span class="ttl">∞</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">2 bob</span><span class="chip">3 carol</span></div></div>
+    <div class="rk-note">alice 的粉丝。推送时遍历它。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:user:1:posts</code><span class="ttl">∞</span></div>
+    <div class="rk-body">
+      <div class="row"><span>9</span><span class="score">1793087000.5</span></div>
+      <div class="row"><span>5</span><span class="score">1791877400.2</span></div>
+    </div>
+    <div class="rk-note">alice 的发件箱：新关注时用来补数据，取消关注时用来删除。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:timeline:3</code><span class="ttl">≤ 500 条</span></div>
+    <div class="rk-body">
+      <div class="row"><span>11</span><span class="score">1793087900.1</span></div>
+      <div class="row"><span>9</span><span class="score">1793087000.5</span></div>
+      <div class="row"><span>7</span><span class="score">1792310000.8</span></div>
+    </div>
+    <div class="rk-note">carol 的收件箱：score = 发布时间。</div>
+  </div>
+</div>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-08"># ---------------------------------------------------------------- step-08 关注与时间线
+def user_following(user_id):
+    """SET  我关注的人"""
+    return _k('user', user_id, 'following')
+
+
+def user_followers(user_id):
+    """SET  关注我的人（粉丝）"""
+    return _k('user', user_id, 'followers')
+
+
+def user_posts(user_id):
+    """ZSET  作者的发件箱：member = 文章 ID，score = 发布时间戳"""
+    return _k('user', user_id, 'posts')
+
+
+def timeline(user_id):
+    """ZSET  用户的收件箱（时间线），最多保留 500 条"""
+    return _k('timeline', user_id)</code></pre>
+
+<h2 id="flow"><span class="num">4</span>三个关键流程</h2>
+<h3 id="flow-publish">4.1 发布：推送给所有粉丝</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant A as Admin（alice 发布文章 #11）
+  participant S as signals.post_saved
+  participant T as timeline.publish
+  participant R as Redis
+  A->>S: post_save（status = PB）
+  S->>T: publish(post)
+  T->>R: ZADD blog:user:1:posts 1793087900.1 11
+  loop SSCAN blog:user:1:followers（每批 1000）
+    T->>R: ZADD blog:timeline:{fid} 1793087900.1 11
+    T->>R: ZREMRANGEBYRANK blog:timeline:{fid} 0 -501
+  end
+  Note over T,R: 每 1000 个粉丝执行一次 pipeline
+  </pre></div>
+  <figcaption>图 2　推送。ZREMRANGEBYRANK 0 -501 删除排名在倒数第 500 名之前的元素，也就是只保留最新的 500 条</figcaption>
+</figure>
+
+<h3 id="flow-follow">4.2 关注 / 取消关注</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TB
+  F(["carol 关注 alice"]) --> F1["MULTI<br/>SADD user:3:following 1<br/>SADD user:1:followers 3<br/>EXEC"]
+  F1 --> F2{"SADD 返回 1？<br/>（新关注）"}
+  F2 -->|是| F3["ZREVRANGE user:1:posts 0 49 WITHSCORES<br/>→ ZADD timeline:3 …（补最近 50 篇）"]
+  F2 -->|否| F4["已经关注过，什么也不做"]
+  U(["carol 取消关注 alice"]) --> U1["SREM 两个集合"]
+  U1 --> U2["ZRANGE user:1:posts 0 -1<br/>→ ZREM timeline:3 …（移除 alice 的文章）"]
+  </pre></div>
+  <figcaption>图 3　有了作者发件箱，补数据和清理数据都不用查数据库</figcaption>
+</figure>
+
+<h3 id="flow-read">4.3 读取：游标分页</h3>
+<p>为什么不用 <code>ZREVRANGE timeline 10 19</code> 这种偏移量分页？看看翻页过程中有新文章发布会怎样：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph OFF["偏移量分页 ✗"]
+    direction TB
+    O1["第 1 页 offset 0~1：<br/>A4 A3"] --> O2["此时发布了 NEW<br/>列表变为 NEW A4 A3 A2 A1 A0"]
+    O2 --> O3["第 2 页 offset 2~3：<br/>A3 A2 ← A3 重复了"]
+  end
+  subgraph CUR["分数游标 ✓"]
+    direction TB
+    C1["第 1 页：A4 A3<br/>记下最后一条的 score = t3"] --> C2["此时发布了 NEW"]
+    C2 --> C3["第 2 页：score &lt; t3 的前 2 条<br/>ZREVRANGEBYSCORE (t3 -inf LIMIT 0 2<br/>→ A2 A1"]
+  end
+  </pre></div>
+  <figcaption>图 4　游标用的是 score（发布时间），新文章的 score 更大，不影响后面的页</figcaption>
+</figure>
+<p><code>(t3</code> 中的左括号表示开区间，不包含 t3 本身，所以上一页的最后一条不会重复出现。这个场景就是测试里的 <code>test_cursor_pagination_survives_new_posts</code>。</p>
+
+<h2 id="sets"><span class="num">5</span>集合运算：共同关注与互相关注</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph A["bob 关注的人"]
+    a1["alice"]
+    a2["dave"]
+  end
+  subgraph B["carol 关注的人"]
+    b1["alice"]
+    b2["bob"]
+  end
+  A & B --> I(["SINTER<br/>user:2:following user:3:following"]) --> R["{alice}<br/>你们都关注了 alice"]
+  </pre></div>
+  <figcaption>图 5　共同关注 = 两个 following 集合的交集；互相关注 = 我的 following ∩ 我的 followers</figcaption>
+</figure>
+<div class="table-wrap"><table>
+  <thead><tr><th>需求</th><th>命令</th></tr></thead>
+  <tbody>
+    <tr><td>我们的共同关注</td><td><code>SINTER following:我 following:TA</code></td></tr>
+    <tr><td>我的互关好友</td><td><code>SINTER following:我 followers:我</code></td></tr>
+    <tr><td>我关注了但没关注我的</td><td><code>SDIFF following:我 followers:我</code></td></tr>
+    <tr><td>可能认识的人（我关注的人关注了谁）</td><td><code>SUNION following:A following:B …</code> 再 <code>SDIFF</code> 掉已关注的</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="cli"><span class="num">6</span>用 redis-cli 体验</h2>
+<pre class="cli"><code><span class="prompt">&gt; </span>ZADD demo:tl 100 a0 200 a1 300 a2 400 a3 500 a4
+<span class="prompt">&gt; </span>ZREVRANGEBYSCORE demo:tl +inf -inf WITHSCORES LIMIT 0 2      <span class="cmt"># 第 1 页</span>
+<span class="out">1) "a4" 2) "500" 3) "a3" 4) "400"</span>
+<span class="prompt">&gt; </span>ZADD demo:tl 600 new                                          <span class="cmt"># 新文章</span>
+<span class="prompt">&gt; </span>ZREVRANGEBYSCORE demo:tl (400 -inf WITHSCORES LIMIT 0 2       <span class="cmt"># 第 2 页，游标 = 400</span>
+<span class="out">1) "a2" 2) "300" 3) "a1" 4) "200"</span>
+<span class="prompt">&gt; </span>ZREMRANGEBYRANK demo:tl 0 -4                                  <span class="cmt"># 只保留最新 3 条</span>
+<span class="out">(integer) 3</span>
+<span class="prompt">&gt; </span>ZRANGE demo:tl 0 -1
+<span class="out">1) "a3" 2) "a4" 3) "new"</span>
+<span class="prompt">&gt; </span>SADD demo:f:bob alice dave
+<span class="prompt">&gt; </span>SADD demo:f:carol alice bob
+<span class="prompt">&gt; </span>SINTER demo:f:bob demo:f:carol
+<span class="out">1) "alice"</span></code></pre>
+
+<h2 id="code"><span class="num">7</span>代码实现</h2>
+<h3 id="code-follow">7.1 关注</h3>
+<pre data-file="Chapter03/mysite/blog/services/timeline.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/timeline.py::follow">def follow(follower_id, followee_id):
+    """关注。返回 True 表示新关注。"""
+    if follower_id == followee_id:
+        raise ValueError("You can't follow yourself.")
+    r = get_redis()
+    pipe = r.pipeline()
+    pipe.sadd(K.user_following(follower_id), followee_id)
+    pipe.sadd(K.user_followers(followee_id), follower_id)
+    added, _ = pipe.execute()
+    if added:
+        _backfill(r, follower_id, followee_id)
+    return bool(added)</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/timeline.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/timeline.py::_backfill">def _backfill(r, user_id, author_id):
+    """新关注一个作者：把他最近的文章补进我的时间线。"""
+    recent = r.zrevrange(K.user_posts(author_id), 0, BACKFILL - 1, withscores=True)
+    if recent:
+        pipe = r.pipeline()
+        pipe.zadd(K.timeline(user_id), dict(recent))
+        pipe.zremrangebyrank(K.timeline(user_id), 0, -TIMELINE_MAX - 1)
+        pipe.execute()</code></pre>
+<h3 id="code-publish">7.2 推送</h3>
+<pre data-file="Chapter03/mysite/blog/services/timeline.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/timeline.py::publish">def publish(post):
+    """文章发布（或更新）时：写入作者发件箱，再推送到每个粉丝的收件箱。"""
+    r = get_redis()
+    score = post.publish.timestamp()
+    r.zadd(K.user_posts(post.author_id), {post.id: score})
+
+    pipe = r.pipeline(transaction=False)
+    # SSCAN 分批遍历粉丝，粉丝很多时也不会一次把 Redis 卡住
+    for i, follower_id in enumerate(
+        r.sscan_iter(K.user_followers(post.author_id), count=FANOUT_BATCH), 1
+    ):
+        pipe.zadd(K.timeline(follower_id), {post.id: score})
+        pipe.zremrangebyrank(K.timeline(follower_id), 0, -TIMELINE_MAX - 1)
+        if i % FANOUT_BATCH == 0:
+            pipe.execute()
+    pipe.execute()</code></pre>
+<div class="callout info">
+  <span class="label">SSCAN 和 SMEMBERS</span>
+  <p><code>SMEMBERS</code> 一次返回整个集合，粉丝有几十万时，这一条命令会阻塞 Redis 一段时间，返回的数据量也很大。<code>sscan_iter</code> 在内部反复调用 <code>SSCAN cursor COUNT 1000</code>，每次只取一小批，期间其他客户端的命令可以穿插执行。</p>
+</div>
+<h3 id="code-read">7.3 读取时间线</h3>
+<pre data-file="Chapter03/mysite/blog/services/timeline.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/timeline.py::get_timeline">def get_timeline(user_id, before=None, count=10):
+    """
+    游标分页读取时间线。before 是上一页最后一条的 score（发布时间戳），
+    返回 (文章列表, 下一页的 before 或 None)。
+    """
+    # "(" 表示开区间：不包含 before 本身，避免上一页最后一条重复出现
+    max_score = f'({before}' if before is not None else '+inf'
+    pairs = get_redis().zrevrangebyscore(
+        K.timeline(user_id), max_score, '-inf', start=0, num=count, withscores=True
+    )
+    ids = [int(member) for member, _ in pairs]
+    posts = Post.published.in_bulk(ids)
+    next_before = pairs[-1][1] if len(pairs) == count else None
+    return [posts[i] for i in ids if i in posts], next_before</code></pre>
+<h3 id="code-signal">7.4 信号</h3>
+<pre data-file="Chapter03/mysite/blog/signals.py"><code class="language-python" data-include="Chapter03/mysite/blog/signals.py::post_saved">@receiver(post_save, sender=Post)
+def post_saved(sender, instance, **kwargs):
+    # step-05 删除缓存（而不是更新缓存），下次读取时自然会重新加载
+    cache_service.invalidate_post(instance)
+    if getattr(instance, '_old', None) is not None:
+        cache_service.invalidate_post(instance._old)
+    cache_service.invalidate_sidebar()
+
+    if instance.status == Post.Status.PUBLISHED:
+        # step-08 推送到粉丝的时间线
+        timeline.publish(instance)
+    else:
+        # step-04 下线的文章从排行榜移除
+        ranking.remove_post(instance.id)
+        # step-08 从时间线移除
+        timeline.unpublish(instance)</code></pre>
+<h3 id="code-rebuild">7.5 重建发件箱</h3>
+<p>发件箱的数据可以从数据库完整推导出来（设计文档中的「模式 A」），所以提供了 <code>python manage.py rebuild_redis_index</code>。后面的章节也会往这个命令里添加各自的重建逻辑。</p>
+<pre data-file="Chapter03/mysite/blog/services/timeline.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/timeline.py::rebuild_outboxes">def rebuild_outboxes():
+    """从数据库重建所有作者的发件箱（Redis 数据丢失或首次上线时使用）。"""
+    r = get_redis()
+    pipe = r.pipeline(transaction=False)
+    for post in Post.published.only('id', 'author_id', 'publish'):
+        pipe.zadd(K.user_posts(post.author_id), {post.id: post.publish.timestamp()})
+    pipe.execute()</code></pre>
+
+<h2 id="lab"><span class="num">8</span>动手实验</h2>
+<ol class="steps">
+  <li>重新执行 <code>seed_demo</code>，它会建立关注关系：bob → alice，carol → alice、bob，alice → carol。</li>
+  <li>用 carol 登录打开 <code>/blog/timeline/</code>，可以看到 alice 和 bob 的文章，互关好友中有 alice。翻到下一页，看 URL 中的 <code>?before=</code> 参数。</li>
+  <li>用 bob 打开 <code>/blog/author/carol/</code>，可以看到「You both follow: alice」。</li>
+  <li>用 admin 登录后台，以 alice 的身份发一篇新文章，切回 carol 的时间线，新文章出现在最上面。</li>
+  <li>
+    <p>在 redis-cli 中查看：</p>
+<pre class="cli"><code><span class="prompt">&gt; </span>SMEMBERS blog:user:1:followers
+<span class="prompt">&gt; </span>ZREVRANGE blog:timeline:3 0 4 WITHSCORES
+<span class="prompt">&gt; </span>SINTER blog:user:2:following blog:user:3:following</code></pre>
+  </li>
+</ol>
+
+<h2 id="think"><span class="num">9</span>边界与思考</h2>
+<div class="callout warn">
+  <span class="label">本实现的取舍</span>
+  <ul>
+    <li><strong>推送是同步执行的</strong>：在保存文章的请求中完成。粉丝有几万人时，Admin 保存文章会变慢。应该把推送交给后台进程，第 12 章的 Stream 消息队列就可以用来做这件事。</li>
+    <li><strong>score 相同的文章</strong>：游标用开区间，如果两篇文章的发布时间完全相同（精确到微秒），翻页可能漏掉一篇。严格的做法是用「score + member」组合作为游标。</li>
+    <li><strong>只保留 500 条</strong>：翻到 500 条以后就没有数据了。可以在收件箱读完后改用拉模式，从关注的作者发件箱里继续取。</li>
+  </ul>
+</div>
+<div class="callout think">
+  <span class="label">思考题</span>
+  <ol>
+    <li>一位作者有 100 万粉丝（大 V），推模式会写 100 万次。推拉结合的方案中，读时间线的代码应该怎么改？（提示：<code>ZUNIONSTORE</code> 收件箱和大 V 的发件箱）</li>
+    <li>长期不登录的「僵尸粉」也会收到推送。怎么只推送给最近活跃的粉丝？</li>
+    <li><code>unfollow</code> 中，如果作者发件箱很大，<code>ZREM timeline *post_ids</code> 会很慢。有没有更好的办法？</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="07-checkin.html"><small>上一篇</small>← step-07 签到</a>
+  <a class="next" href="09-recommend.html"><small>下一篇</small>step-09 个性化推荐 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

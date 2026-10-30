@@ -1,0 +1,38 @@
+{% extends "blog/base.html" %}
+
+{% block title %}{{ author.username }}{% endblock %}
+
+{% block content %}
+  <h1>{{ author.username }}</h1>
+  <p class="stats">
+    {{ counts.followers }} follower{{ counts.followers|pluralize }} &middot;
+    following {{ counts.following }}
+  </p>
+  {% if user.is_authenticated and not is_me %}
+    <form class="inline-form" action="{% url "blog:author_follow" author.username %}" method="post">
+      {% csrf_token %}
+      {% if following %}
+        <input type="hidden" name="action" value="unfollow">
+        <input type="submit" value="Unfollow">
+      {% else %}
+        <input type="hidden" name="action" value="follow">
+        <input type="submit" value="Follow">
+      {% endif %}
+    </form>
+  {% endif %}
+  {% if common %}
+    <p class="stats">
+      You both follow:
+      {% for u in common %}
+        <a href="{% url "blog:author_detail" u.username %}">{{ u.username }}</a>{% if not forloop.last %}, {% endif %}
+      {% endfor %}
+    </p>
+  {% endif %}
+
+  <h2>Posts</h2>
+  {% for post in posts %}
+    <p><a href="{{ post.get_absolute_url }}">{{ post.title }}</a> <span class="score">{{ post.publish|date }}</span></p>
+  {% empty %}
+    <p>No posts yet.</p>
+  {% endfor %}
+{% endblock %}

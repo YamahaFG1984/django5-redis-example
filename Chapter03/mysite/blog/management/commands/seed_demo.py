@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from blog.models import Comment, Post
-from blog.services import checkin
+from blog.services import checkin, timeline
 
 PASSWORD = 'redis123'
 
@@ -84,6 +84,12 @@ class Command(BaseCommand):
                     Comment.objects.create(
                         post=post, name=name, email=email, body=body
                     )
+
+        # step-08 关注关系：bob 关注 alice；carol 关注 alice 和 bob；alice 关注 carol
+        for follower, followee in [
+            ('bob', 'alice'), ('carol', 'alice'), ('carol', 'bob'), ('alice', 'carol'),
+        ]:
+            timeline.follow(users[follower].id, users[followee].id)
 
         # step-07 alice 在最近 9 天里签到了 8 天（4 天前断签，今天还没签）
         today = timezone.localdate()

@@ -6,7 +6,8 @@
 {% block content %}
   <h1>{{ post.title }}</h1>
   <p class="date">
-    Published {{ post.publish }} by {{ post.author }}
+    Published {{ post.publish }} by
+    <a href="{% url "blog:author_detail" post.author.username %}">{{ post.author }}</a>
   </p>
   <p class="stats">
     {{ views }} view{{ views|pluralize }} &middot;

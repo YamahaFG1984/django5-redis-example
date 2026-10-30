@@ -6,7 +6,7 @@ from django.dispatch import receiver
 
 from .models import Comment, Post
 from .services import cache as cache_service
-from .services import likes, ranking
+from .services import likes, ranking, timeline
 
 
 @receiver(pre_save, sender=Post)
@@ -23,9 +23,14 @@ def post_saved(sender, instance, **kwargs):
         cache_service.invalidate_post(instance._old)
     cache_service.invalidate_sidebar()
 
-    if instance.status != Post.Status.PUBLISHED:
+    if instance.status == Post.Status.PUBLISHED:
+        # step-08 推送到粉丝的时间线
+        timeline.publish(instance)
+    else:
         # step-04 下线的文章从排行榜移除
         ranking.remove_post(instance.id)
+        # step-08 从时间线移除
+        timeline.unpublish(instance)
 
 
 @receiver(post_delete, sender=Post)
@@ -35,6 +40,8 @@ def post_deleted(sender, instance, **kwargs):
     ranking.remove_post(instance.id)
     # step-06 清理点赞关系
     likes.remove_post(instance.id)
+    # step-08 从时间线移除
+    timeline.unpublish(instance)
 
 
 @receiver([post_save, post_delete], sender=Comment)

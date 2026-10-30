@@ -1,0 +1,29 @@
+{% extends "blog/base.html" %}
+
+{% block title %}My timeline{% endblock %}
+
+{% block content %}
+  <h1>My timeline</h1>
+  <p class="stats">
+    Following {{ counts.following }} &middot;
+    {{ counts.followers }} follower{{ counts.followers|pluralize }}
+    {% if mutual %}
+      &middot; Mutual:
+      {% for u in mutual %}
+        <a href="{% url "blog:author_detail" u.username %}">{{ u.username }}</a>{% if not forloop.last %}, {% endif %}
+      {% endfor %}
+    {% endif %}
+  </p>
+  {% for post in posts %}
+    <h2><a href="{{ post.get_absolute_url }}">{{ post.title }}</a></h2>
+    <p class="date">
+      Published {{ post.publish }} by
+      <a href="{% url "blog:author_detail" post.author.username %}">{{ post.author }}</a>
+    </p>
+  {% empty %}
+    <p>Nothing here yet. Follow some authors from their profile page.</p>
+  {% endfor %}
+  {% if next_before %}
+    <p class="pagination"><a href="?before={{ next_before }}">Older posts &raquo;</a></p>
+  {% endif %}
+{% endblock %}

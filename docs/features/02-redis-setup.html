@@ -223,7 +223,12 @@ TEST_CACHES = {
 }
 
 
-@override_settings(REDIS_URL=TEST_REDIS_URL, CACHES=TEST_CACHES)
+@override_settings(
+    REDIS_URL=TEST_REDIS_URL,
+    CACHES=TEST_CACHES,
+    # 测试里创建用户很多，用最快的密码哈希
+    PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'],
+)
 class RedisTestCase(TestCase):
     """
     连接真实 Redis 的测试基类。

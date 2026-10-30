@@ -18,6 +18,7 @@
         Hi, <strong>{{ user.username }}</strong>
         &middot; <a href="{% url "blog:my_likes" %}">My likes</a>
         &middot; <a href="{% url "blog:daily_checkin" %}">Check in</a>
+        &middot; <a href="{% url "blog:my_timeline" %}">Timeline</a>
         <form class="inline-form" action="{% url "logout" %}" method="post">
           {% csrf_token %}
           <input type="submit" value="Log out">

@@ -1,6 +1,7 @@
 import calendar
 
 from django.contrib import messages
+from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.cache import cache
@@ -18,7 +19,7 @@ from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
-from .services import checkin, likes, pageviews, ranking
+from .services import checkin, likes, pageviews, ranking, timeline
 from .visitors import get_visitor_id
 
 
@@ -279,5 +280,55 @@ def daily_checkin(request):
             'month_count': checkin.month_count(user_id, today),
             'checked_in_today_total': checkin.checked_in_count(today),
             'full_week_total': checkin.full_week_count(today),
+        },
+    )
+
+
+def author_detail(request, username):
+    author = get_object_or_404(get_user_model(), username=username)
+    me = request.user
+    context = {
+        'author': author,
+        'posts': Post.published.filter(author=author),
+        'counts': timeline.follow_counts(author.id),
+        'is_me': me.is_authenticated and me.id == author.id,
+        'following': me.is_authenticated and timeline.is_following(me.id, author.id),
+        'common': (
+            timeline.common_following(me.id, author.id)
+            if me.is_authenticated and me.id != author.id
+            else []
+        ),
+    }
+    return render(request, 'blog/author.html', context)
+
+
+@login_required
+@require_POST
+def author_follow(request, username):
+    author = get_object_or_404(get_user_model(), username=username)
+    if author.id != request.user.id:
+        if request.POST.get('action') == 'unfollow':
+            timeline.unfollow(request.user.id, author.id)
+        else:
+            timeline.follow(request.user.id, author.id)
+    return redirect('blog:author_detail', username=username)
+
+
+@login_required
+def my_timeline(request):
+    before = request.GET.get('before')
+    try:
+        before = float(before) if before else None
+    except ValueError:
+        before = None
+    posts, next_before = timeline.get_timeline(request.user.id, before)
+    return render(
+        request,
+        'blog/timeline.html',
+        {
+            'posts': posts,
+            'next_before': repr(next_before) if next_before is not None else None,
+            'counts': timeline.follow_counts(request.user.id),
+            'mutual': timeline.mutual_follows(request.user.id),
         },
     )
