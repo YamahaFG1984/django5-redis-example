@@ -71,3 +71,14 @@ def cache_sidebar_ns():
 
 def cache_sidebar(ns, name):
     return f'sidebar:{ns}:{name}'
+
+
+# ---------------------------------------------------------------- step-06 点赞
+def post_likers(post_id):
+    """SET  给这篇文章点过赞的用户 ID"""
+    return _k('post', post_id, 'likers')
+
+
+def user_likes(user_id):
+    """ZSET  用户点赞过的文章：member = 文章 ID，score = 点赞时间戳"""
+    return _k('user', user_id, 'likes')

@@ -6,7 +6,7 @@ from django.dispatch import receiver
 
 from .models import Comment, Post
 from .services import cache as cache_service
-from .services import ranking
+from .services import likes, ranking
 
 
 @receiver(pre_save, sender=Post)
@@ -33,6 +33,8 @@ def post_deleted(sender, instance, **kwargs):
     cache_service.invalidate_post(instance)
     cache_service.invalidate_sidebar()
     ranking.remove_post(instance.id)
+    # step-06 清理点赞关系
+    likes.remove_post(instance.id)
 
 
 @receiver([post_save, post_delete], sender=Comment)

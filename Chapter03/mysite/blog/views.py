@@ -1,10 +1,11 @@
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.cache import cache
 from django.core.mail import send_mail
+from django.contrib.auth.decorators import login_required
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db.models import Count
 from django.http import Http404
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 from django.views.generic import ListView
 from taggit.models import Tag
@@ -13,7 +14,7 @@ from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
-from .services import pageviews, ranking
+from .services import likes, pageviews, ranking
 from .visitors import get_visitor_id
 
 
@@ -36,6 +37,8 @@ def post_list(request, tag_slug=None):
         posts = paginator.page(paginator.num_pages)
     # Redis: view counters for the whole page in one MGET
     pageviews.attach_view_counts(posts)
+    # Redis: like counts + "did I like it" in one pipeline
+    likes.attach_like_info(posts, request.user)
     return render(
         request,
         'blog/post/list.html',
@@ -80,6 +83,11 @@ def post_detail(request, year, month, day, post):
             'similar_posts': similar_posts,
             'views': pageviews.get_views(post),
             'unique_visitors': pageviews.get_uv(post),
+            'like_count': likes.like_count(post.id),
+            'liked': (
+                request.user.is_authenticated
+                and likes.has_liked(request.user.id, post.id)
+            ),
         },
     )
 
@@ -215,3 +223,24 @@ def post_ranking(request):
         ('All time', ranking.top_posts('total')),
     ]
     return render(request, 'blog/post/ranking.html', {'boards': boards})
+
+
+@login_required
+@require_POST
+def post_like(request, post_id):
+    post = get_object_or_404(
+        Post,
+        id=post_id,
+        status=Post.Status.PUBLISHED
+    )
+    if request.POST.get('action') == 'unlike':
+        likes.unlike(request.user.id, post.id)
+    else:
+        likes.like(request.user.id, post.id)
+    return redirect(post)
+
+
+@login_required
+def my_likes(request):
+    posts = likes.liked_posts(request.user.id)
+    return render(request, 'blog/post/likes.html', {'posts': posts})

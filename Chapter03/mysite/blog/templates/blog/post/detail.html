@@ -10,8 +10,19 @@
   </p>
   <p class="stats">
     {{ views }} view{{ views|pluralize }} &middot;
-    {{ unique_visitors }} reader{{ unique_visitors|pluralize }}
+    {{ unique_visitors }} reader{{ unique_visitors|pluralize }} &middot;
+    {{ like_count }} like{{ like_count|pluralize }}
   </p>
+  <form class="inline-form like-form" action="{% url "blog:post_like" post.id %}" method="post">
+    {% csrf_token %}
+    {% if liked %}
+      <input type="hidden" name="action" value="unlike">
+      <input type="submit" value="&#9829; Liked">
+    {% else %}
+      <input type="hidden" name="action" value="like">
+      <input type="submit" value="&#9825; Like">
+    {% endif %}
+  </form>
   {{ post.body|markdown }}
   <p>
     <a href="{% url "blog:post_share" post.id %}">

@@ -25,6 +25,7 @@
     <p class="date">
       Published {{ post.publish }} by {{ post.author }}
       &middot; {{ post.view_count }} view{{ post.view_count|pluralize }}
+      &middot; {% if post.liked %}&#9829;{% else %}&#9825;{% endif %} {{ post.like_count }}
     </p>
     {{ post.body|markdown|truncatewords_html:30 }}
   {% endfor %}

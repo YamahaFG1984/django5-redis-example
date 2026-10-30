@@ -230,7 +230,18 @@ def cache_sidebar_ns():
 
 
 def cache_sidebar(ns, name):
-    return f'sidebar:{ns}:{name}'</code></pre>
+    return f'sidebar:{ns}:{name}'
+
+
+# ---------------------------------------------------------------- step-06 点赞
+def post_likers(post_id):
+    """SET  给这篇文章点过赞的用户 ID"""
+    return _k('post', post_id, 'likers')
+
+
+def user_likes(user_id):
+    """ZSET  用户点赞过的文章：member = 文章 ID，score = 点赞时间戳"""
+    return _k('user', user_id, 'likes')</code></pre>
 <p>这一章只有一个辅助函数 <code>_k()</code>。从下一章开始，每个功能都会在这里添加自己的 Key 函数，例如：</p>
 <pre><code class="language-python">def post_views(post_id):          # step-03
     return _k('post', post_id, 'views')      # blog:post:42:views

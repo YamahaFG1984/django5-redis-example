@@ -24,4 +24,6 @@ urlpatterns = [
     path('feed/', LatestPostsFeed(), name='post_feed'),
     path('search/', views.post_search, name='post_search'),
     path('ranking/', views.post_ranking, name='post_ranking'),
+    path('<int:post_id>/like/', views.post_like, name='post_like'),
+    path('likes/', views.my_likes, name='my_likes'),
 ]
