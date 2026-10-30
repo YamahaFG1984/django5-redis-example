@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>博客 Redis 系统设计</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="index.html">首页</a>
+    <a href="01-prd.html">PRD</a>
+    <a href="02-design.html">设计文档</a>
+    <a href="index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">02 · System Design</div>
+  <h1>系统设计文档</h1>
+  <p class="lead">PRD 回答了「做什么」，这份文档回答「怎么做」：Redis 放在架构的什么位置，代码怎么分层，Key 怎么命名，数据以谁为准。</p>
+  <div class="meta">
+    <span class="pill">版本 v1.0</span>
+    <span class="pill tag">step-01-docs</span>
+  </div>
+</section>
+
+<h2 id="arch"><span class="num">1</span>总体架构</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  B["🌐 浏览器"] --> V
+
+  subgraph Django["Django 进程 (web_run)"]
+    direction TB
+    V["views.py<br/>处理 HTTP"] --> S["services/*<br/>业务逻辑 + Redis 操作"]
+    V --> ORM["models.py<br/>ORM"]
+    SIG["signals.py<br/>模型变更钩子"] --> S
+    ORM -.post_save / m2m_changed.-> SIG
+    TT["templatetags<br/>侧边栏"] --> S
+    S --> RC["redis_client.py<br/>连接池"]
+    S --> DC["django cache<br/>RedisCache"]
+  end
+
+  subgraph Worker["后台进程 (web_worker)"]
+    W["notify_worker<br/>Stream 消费者"]
+  end
+  CRON["⏰ cron<br/>sync_post_views"]
+
+  RC --> R0[("Redis db0<br/>业务数据")]
+  DC --> R1[("Redis db1<br/>缓存")]
+  ORM --> PG[("PostgreSQL<br/>持久数据")]
+  W --> R0
+  W --> PG
+  CRON --> R0
+  CRON --> PG
+  </pre></div>
+  <figcaption>图 1　整体架构：Redis 承担业务数据（db0）和缓存（db1）两种角色</figcaption>
+</figure>
+
+<p>几个关键决策：</p>
+<ul>
+  <li><strong>两个逻辑库分开使用。</strong>db0 存业务数据（计数、关系、榜单等）；db1 给 Django 缓存框架用。原因是 <code>cache.clear()</code> 执行的是 <code>FLUSHDB</code>，如果和业务数据放在同一个库，清缓存会把点赞、签到数据一起删掉。</li>
+  <li><strong>两套客户端。</strong>业务数据用 redis-py 直接操作，这样能用到 ZSET、Bitmap、Stream 等全部命令。缓存走 Django 自带的 <code>RedisCache</code> 后端，它会自动处理序列化和 Key 前缀。</li>
+  <li><strong>耗时任务交给后台进程。</strong>通知这类任务通过 Redis Stream 交给独立的 worker 进程处理，不阻塞 Web 请求。</li>
+</ul>
+
+<h2 id="layers"><span class="num">2</span>代码分层与目录</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph L1["表现层：只管 HTTP 和模板"]
+    views["views.py"]
+    tags["templatetags/blog_tags.py"]
+  end
+  subgraph L2["服务层：每个功能一个模块，不依赖 request"]
+    pv["pageviews"] --- rk["ranking"] --- ca["cache"] --- lk["likes"]
+    ck["checkin"] --- tl["timeline"] --- rc["recommend"] --- rl["ratelimit"]
+    se["search"] --- nt["notifications"]
+  end
+  subgraph L3["基础设施层"]
+    keys["redis_keys.py<br/>所有 Key 的唯一出处"]
+    client["redis_client.py<br/>连接池 / get_redis()"]
+  end
+  L1 --> L2 --> L3
+  </pre></div>
+  <figcaption>图 2　三层结构：views 不直接写 Redis 命令，services 不直接拼 Key 字符串</figcaption>
+</figure>
+
+<pre data-file="Chapter03/mysite/blog/（完成后的目录）"><code>blog/
+├── redis_client.py          # step-02 连接池，get_redis()
+├── redis_keys.py            # step-02 起，每一章往里添加 Key 定义
+├── visitors.py              # step-03 访客标识（登录用户 / 匿名 Session）
+├── services/
+│   ├── pageviews.py         # step-03 PV/UV
+│   ├── ranking.py           # step-04 排行榜
+│   ├── cache.py             # step-05 缓存 + 分布式锁
+│   ├── likes.py             # step-06 点赞
+│   ├── checkin.py           # step-07 签到
+│   ├── timeline.py          # step-08 关注 + 时间线
+│   ├── recommend.py         # step-09 推荐
+│   ├── ratelimit.py         # step-10 限流
+│   ├── search.py            # step-11 热搜/历史/联想
+│   └── notifications.py     # step-12 Stream 通知
+├── signals.py               # 模型变化 → 同步 Redis
+├── management/commands/
+│   ├── seed_demo.py         # 演示数据
+│   ├── sync_post_views.py   # 浏览量回写数据库
+│   ├── rebuild_redis_index.py # 从数据库重建索引类数据
+│   └── notify_worker.py     # Stream 消费者
+└── tests/                   # 每个功能一个测试文件
+</code></pre>
+
+<h2 id="keys"><span class="num">3</span>Key 命名规范</h2>
+<h3 id="key-rules">3.1 规则</h3>
+<ol>
+  <li>格式：<code>{前缀}:{实体}:{ID}:{属性}</code>，用冒号分层。RedisInsight 等工具会按冒号把 Key 显示成树。</li>
+  <li>统一前缀 <code>blog:</code>（可通过 <code>REDIS_KEY_PREFIX</code> 修改）。多个项目共用一个 Redis 时不会冲突。</li>
+  <li><strong>所有 Key 都定义在 <code>redis_keys.py</code></strong>，业务代码里不出现手写的 Key 字符串。这样一个文件就能看到 Redis 里全部数据的结构，改名也只需要改一处。</li>
+  <li>按时间分片的 Key 把日期放在最后，例如 <code>:day:20261030</code>，过期清理靠 TTL。</li>
+  <li>临时 Key（计算中间结果、去重标记、锁）<strong>一定要设置 TTL</strong>。</li>
+</ol>
+
+<h3 id="key-table">3.2 全部 Key 一览</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>Key 模式</th><th>类型</th><th>TTL</th><th>章节</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><code>blog:post:{id}:views</code></td><td><span class="t string">STRING</span></td><td>永久</td><td>03</td><td>PV 计数</td></tr>
+    <tr><td><code>blog:post:{id}:uv</code></td><td><span class="t hll">HLL</span></td><td>永久</td><td>03</td><td>UV 基数估算</td></tr>
+    <tr><td><code>blog:post:{id}:seen:{visitor}</code></td><td><span class="t string">STRING</span></td><td>30 分钟</td><td>03</td><td>防刷去重标记</td></tr>
+    <tr><td><code>blog:post:views:dirty</code></td><td><span class="t set">SET</span></td><td>永久</td><td>03</td><td>待回写数据库的文章 ID</td></tr>
+    <tr><td><code>blog:rank:views:total</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>04</td><td>总榜</td></tr>
+    <tr><td><code>blog:rank:views:day:{yyyymmdd}</code></td><td><span class="t zset">ZSET</span></td><td>8 天</td><td>04</td><td>日榜</td></tr>
+    <tr><td><code>blog:rank:views:week:{yyyymmdd}</code></td><td><span class="t zset">ZSET</span></td><td>5 分钟</td><td>04</td><td>周榜（7 个日榜的并集，缓存结果）</td></tr>
+    <tr><td><code>blog:lock:{name}</code></td><td><span class="t string">STRING</span></td><td>10 秒</td><td>05</td><td>分布式锁</td></tr>
+    <tr><td><code>cache:1:post:detail:…</code> 等</td><td><span class="t string">STRING</span></td><td>5~10 分钟 ± 抖动</td><td>05</td><td>Django 缓存（db1）</td></tr>
+    <tr><td><code>blog:post:{id}:likers</code></td><td><span class="t set">SET</span></td><td>永久</td><td>06</td><td>点赞用户集合</td></tr>
+    <tr><td><code>blog:user:{id}:likes</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>06</td><td>用户点赞过的文章（按时间）</td></tr>
+    <tr><td><code>blog:checkin:{uid}:{yyyymm}</code></td><td><span class="t bitmap">BITMAP</span></td><td>400 天</td><td>07</td><td>用户月签到日历</td></tr>
+    <tr><td><code>blog:checkin:day:{yyyymmdd}</code></td><td><span class="t bitmap">BITMAP</span></td><td>40 天</td><td>07</td><td>全站每日签到（offset = 用户 ID）</td></tr>
+    <tr><td><code>blog:user:{id}:checkin</code></td><td><span class="t hash">HASH</span></td><td>永久</td><td>07</td><td>累计天数 / 连续天数 / 最后日期 / 积分</td></tr>
+    <tr><td><code>blog:user:{id}:following</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我关注的人</td></tr>
+    <tr><td><code>blog:user:{id}:followers</code></td><td><span class="t set">SET</span></td><td>永久</td><td>08</td><td>我的粉丝</td></tr>
+    <tr><td><code>blog:user:{id}:posts</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>08</td><td>作者发件箱（score = 发布时间）</td></tr>
+    <tr><td><code>blog:timeline:{id}</code></td><td><span class="t zset">ZSET</span></td><td>永久，最多 500 条</td><td>08</td><td>用户收件箱 / 时间线</td></tr>
+    <tr><td><code>blog:tag:{slug}:posts</code></td><td><span class="t set">SET</span></td><td>永久</td><td>09</td><td>标签 → 文章 倒排索引</td></tr>
+    <tr><td><code>blog:post:{id}:tags</code></td><td><span class="t set">SET</span></td><td>永久</td><td>09</td><td>文章 → 标签（用于增量更新索引）</td></tr>
+    <tr><td><code>blog:visitor:{vid}:interests</code></td><td><span class="t zset">ZSET</span></td><td>30 天</td><td>09</td><td>兴趣画像（标签 → 权重）</td></tr>
+    <tr><td><code>blog:visitor:{vid}:read</code></td><td><span class="t set">SET</span></td><td>30 天</td><td>09</td><td>已读文章</td></tr>
+    <tr><td><code>blog:recommend:{vid}</code></td><td><span class="t zset">ZSET</span></td><td>60 秒</td><td>09</td><td>推荐结果缓存</td></tr>
+    <tr><td><code>blog:ratelimit:fixed:{scope}:{ident}:{window}</code></td><td><span class="t string">STRING</span></td><td>窗口长度</td><td>10</td><td>固定窗口计数</td></tr>
+    <tr><td><code>blog:ratelimit:sliding:{scope}:{ident}</code></td><td><span class="t zset">ZSET</span></td><td>窗口长度</td><td>10</td><td>滑动窗口请求日志</td></tr>
+    <tr><td><code>blog:search:hot</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>11</td><td>热搜词</td></tr>
+    <tr><td><code>blog:search:history:{vid}</code></td><td><span class="t list">LIST</span></td><td>30 天</td><td>11</td><td>最近 10 条搜索</td></tr>
+    <tr><td><code>blog:search:suggest</code></td><td><span class="t zset">ZSET</span></td><td>永久</td><td>11</td><td>标题字典序索引（score 全为 0）</td></tr>
+    <tr><td><code>blog:stream:comments</code></td><td><span class="t stream">STREAM</span></td><td>最多约 1 万条</td><td>12</td><td>评论事件</td></tr>
+    <tr><td><code>blog:user:{id}:inbox</code></td><td><span class="t list">LIST</span></td><td>最多 50 条</td><td>12</td><td>站内信</td></tr>
+    <tr><td><code>blog:user:{id}:unread</code></td><td><span class="t string">STRING</span></td><td>永久</td><td>12</td><td>未读数</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="choose"><span class="num">4</span>数据结构选型方法</h2>
+<p>面对一个新需求时，可以按下面的顺序判断该用哪种结构。后面每一章的「方案选型」都是按这个思路做的。</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+  Q{"需要存什么？"} -->|一个值 / 计数器| STR["STRING<br/>INCR · SET NX EX"]
+  Q -->|一个对象的多个字段| HASH["HASH<br/>HINCRBY · HGETALL"]
+  Q -->|一组元素| G{"要排序吗？"}
+  G -->|不要，只要去重和判断是否存在| SET["SET<br/>SADD · SISMEMBER · SINTER"]
+  G -->|按分数 / 时间排序| ZSET["ZSET<br/>ZINCRBY · ZREVRANGE"]
+  G -->|按插入顺序，只要最新 N 条| LIST["LIST<br/>LPUSH · LTRIM"]
+  Q -->|大量是/否状态| BIT["BITMAP<br/>SETBIT · BITCOUNT"]
+  Q -->|只要去重后的数量<br/>能接受误差| HLL["HyperLogLog<br/>PFADD · PFCOUNT"]
+  Q -->|消息要可靠投递、可以重试| STREAM["STREAM<br/>XADD · XREADGROUP · XACK"]
+  </pre></div>
+  <figcaption>图 3　数据结构选型决策树</figcaption>
+</figure>
+
+<h2 id="truth"><span class="num">5</span>数据以谁为准：一致性策略</h2>
+<p>把数据放进 Redis 之前，先要决定 Redis 和 PostgreSQL 谁是权威数据源。本项目里有三种情况：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph A["模式 A：DB 为准，Redis 是副本"]
+    direction TB
+    a1["缓存（05）<br/>标签索引（09）<br/>搜索联想（11）"]
+    a2["丢了可以从 DB 重建<br/>rebuild_redis_index"]
+    a1 --> a2
+  end
+  subgraph B["模式 B：Redis 先写，异步落 DB"]
+    direction TB
+    b1["浏览量（03）"]
+    b2["定时 sync_post_views<br/>Redis 丢失后从 DB 值继续"]
+    b1 --> b2
+  end
+  subgraph C["模式 C：Redis 为主存储"]
+    direction TB
+    c1["点赞 · 签到 · 关注<br/>排行榜 · 限流 · 通知"]
+    c2["靠 AOF 持久化<br/>生产环境建议双写 DB"]
+    c1 --> c2
+  end
+  </pre></div>
+  <figcaption>图 4　三种一致性模式</figcaption>
+</figure>
+
+<div class="callout warn">
+  <span class="label">关于模式 C</span>
+  <p>教学项目为了突出 Redis 的用法，把点赞、关注等数据只存在 Redis 里，并在 docker compose 中开启了 <code>appendonly yes</code>（AOF，每秒刷盘），最多丢失约 1 秒的数据。生产环境中这类用户资产通常会<strong>同时写入数据库</strong>（或者通过 Stream 异步写入），Redis 只负责高频读取。</p>
+</div>
+
+<h3 id="sync">5.1 模型变化如何同步到 Redis</h3>
+<p>文章在后台被修改、下线、删除时，Redis 中的派生数据要跟着更新。统一用 Django 信号处理，views 里不用关心这些：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant Admin as Django Admin
+  participant ORM as Post.save()
+  participant Sig as signals.py
+  participant R as Redis
+  Admin->>ORM: 保存文章（状态 = 已发布）
+  ORM-->>Sig: post_save
+  Sig->>R: 05 删除详情缓存、侧边栏缓存
+  Sig->>R: 08 推送到粉丝的时间线
+  Sig->>R: 11 更新标题联想索引
+  Admin->>ORM: 保存标签 tags.set([...])
+  ORM-->>Sig: m2m_changed
+  Sig->>R: 09 更新 标签→文章 索引
+  Admin->>ORM: 下线 / 删除文章
+  ORM-->>Sig: post_save / post_delete
+  Sig->>R: 04 从榜单移除 · 08 从时间线移除 · 09/11 移出索引
+  </pre></div>
+  <figcaption>图 5　信号驱动的同步：每个章节往 signals.py 里添加自己的处理函数</figcaption>
+</figure>
+
+<h2 id="perf"><span class="num">6</span>性能约定</h2>
+<div class="compare">
+  <div class="bad">
+    <h4>不要这样写</h4>
+<pre><code class="language-python"># 列表页 10 篇文章 → 10 次网络往返
+for post in posts:
+    post.views = r.get(f'blog:post:{post.id}:views')</code></pre>
+  </div>
+  <div class="good">
+    <h4>应该这样写</h4>
+<pre><code class="language-python"># 1 次往返拿到全部
+keys = [K.post_views(p.id) for p in posts]
+for post, v in zip(posts, r.mget(keys)):
+    post.views = int(v or 0)</code></pre>
+  </div>
+</div>
+<ul>
+  <li><strong>批量读用 MGET 或 pipeline</strong>，一次请求内的 Redis 往返次数要固定，不能随数据量增长。</li>
+  <li><strong>多条写命令用 pipeline 合并</strong>；需要「先判断再写」的逻辑用 Lua 脚本，保证原子性。</li>
+  <li><strong>不要用 <code>KEYS *</code></strong>，会阻塞 Redis。需要遍历时用 <code>SCAN</code>（见 <code>sync_post_views</code>，用 dirty 集合避免遍历）。</li>
+  <li><strong>大集合控制大小</strong>：时间线 <code>ZREMRANGEBYRANK</code> 截断到 500，收件箱 <code>LTRIM</code> 到 50，Stream 用 <code>MAXLEN ~</code> 截断。</li>
+</ul>
+
+<h2 id="visitor"><span class="num">7</span>访客标识</h2>
+<p>浏览量、推荐、搜索历史这些功能对匿名用户也要生效，所以需要一个统一的「访客 ID」：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  R["request"] --> A{"已登录？"}
+  A -->|是| U["u:{user.id}<br/>例：u:3"]
+  A -->|否| S{"有 session_key？"}
+  S -->|有| SK["s:{session_key}"]
+  S -->|没有| NEW["session.save() 生成一个"] --> SK
+  </pre></div>
+  <figcaption>图 6　<code>visitors.get_visitor_id(request)</code> 的逻辑</figcaption>
+</figure>
+
+<h2 id="test"><span class="num">8</span>测试策略</h2>
+<ul>
+  <li>测试连接<strong>真实的 Redis</strong>（不用 mock），这样测到的就是真实命令的行为；使用 db15（业务）和 db14（缓存），不会影响开发数据。</li>
+  <li><code>RedisTestCase</code> 基类在每个用例开始前执行 <code>FLUSHDB</code>，保证用例之间互不影响。</li>
+  <li>服务层测试直接调用 service 函数；视图层测试用 Django <code>Client</code> 走完整请求，再到 Redis 里检查数据。</li>
+</ul>
+<pre class="cli"><code><span class="prompt">$ </span>python manage.py test blog -v 2
+<span class="out">test_dedup_within_window (blog.tests.test_pageviews.PageViewServiceTests) ... ok
+test_weekly_union (blog.tests.test_ranking.RankingTests) ... ok
+...</span></code></pre>
+
+<h2 id="deploy"><span class="num">9</span>部署拓扑</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph compose["docker compose"]
+    web_run["web_run<br/>runserver :8000"]
+    web_worker["web_worker<br/>notify_worker"]
+    web_migrate["web_migrate<br/>一次性 migrate"]
+    db[("db<br/>postgres:16")]
+    redis[("redis<br/>redis:7.4 · AOF")]
+  end
+  web_run --> db
+  web_run --> redis
+  web_worker --> db
+  web_worker --> redis
+  web_migrate --> db
+  </pre></div>
+  <figcaption>图 7　docker compose 服务：step-02 增加 redis，step-12 增加 web_worker</figcaption>
+</figure>
+
+<h2 id="degrade"><span class="num">10</span>风险与降级</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>风险</th><th>影响</th><th>本项目的处理</th><th>生产环境建议</th></tr></thead>
+  <tbody>
+    <tr><td>Redis 宕机</td><td>所有依赖 Redis 的功能报错</td><td>教学项目将 Redis 视为强依赖</td><td>在 service 层捕获 <code>redis.ConnectionError</code>：计数类直接跳过，展示类回落到数据库查询</td></tr>
+    <tr><td>Redis 数据丢失</td><td>计数、关系丢失</td><td>AOF；浏览量回写数据库；索引可以 rebuild</td><td>主从复制 + 哨兵 / 集群；用户资产双写数据库</td></tr>
+    <tr><td>大 Key</td><td>阻塞、迁移慢</td><td>时间线、收件箱、Stream 都限制了长度</td><td>定期用 <code>redis-cli --bigkeys</code> 巡检</td></tr>
+    <tr><td>热 Key</td><td>单分片压力大</td><td>—</td><td>本地缓存 + Key 打散</td></tr>
+  </tbody>
+</table></div>
+
+<div class="pager">
+  <a href="01-prd.html"><small>上一篇</small>← 产品需求文档</a>
+  <a class="next" href="features/02-redis-setup.html"><small>下一篇</small>step-02 接入 Redis →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

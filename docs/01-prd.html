@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>博客 Redis 增强 PRD</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="index.html">首页</a>
+    <a href="01-prd.html">PRD</a>
+    <a href="02-design.html">设计文档</a>
+    <a href="index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">01 · Product Requirements</div>
+  <h1>产品需求文档（PRD）</h1>
+  <p class="lead">在现有博客上补齐一个内容社区常见的互动和运营功能，同时把这个项目做成学习 Redis 的教材。</p>
+  <div class="meta">
+    <span class="pill">版本 v1.0</span>
+    <span class="pill">状态：已评审</span>
+    <span class="pill tag">step-01-docs</span>
+  </div>
+</section>
+
+<h2 id="background"><span class="num">1</span>背景</h2>
+<h3 id="current">1.1 现状</h3>
+<p>《Django 5 By Example》第 3 章完成后，博客已经具备：</p>
+<ul>
+  <li>文章的发布、列表分页、详情页（PostgreSQL 存储，<code>Post.published</code> 管理器）；</li>
+  <li>按标签筛选（django-taggit），基于共同标签的「相似文章」；</li>
+  <li>评论、邮件分享、RSS、Sitemap、基于三元组相似度的全文搜索；</li>
+  <li>侧边栏：文章总数、最新文章、评论最多的文章。</li>
+</ul>
+
+<h3 id="problems">1.2 存在的问题</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>问题</th><th>表现</th><th>根因</th></tr></thead>
+  <tbody>
+    <tr><td>读者互动少</td><td>看不到浏览量、不能点赞、不能关注作者</td><td>缺少互动功能</td></tr>
+    <tr><td>内容不好找</td><td>只有「最新」和「评论最多」，没有热榜和个性化推荐</td><td>缺少行为数据及其计算</td></tr>
+    <tr><td>每次请求都查库</td><td>侧边栏 3 个查询、相似文章聚合查询，每个页面都要执行</td><td>没有缓存层</td></tr>
+    <tr><td>容易被滥用</td><td>评论、分享邮件接口可以被无限次调用</td><td>没有限流</td></tr>
+    <tr><td>作者收不到反馈</td><td>有新评论时作者不知道</td><td>没有通知机制</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="why-redis">1.3 为什么用 Redis</h3>
+<p>上面这些需求有几个共同点：<strong>写入频繁</strong>（每次浏览都要计数）、<strong>读取频繁</strong>（每个页面都显示）、<strong>对实时性有要求</strong>，同时<strong>能接受少量数据丢失</strong>（浏览量差几个不影响业务）。关系型数据库不擅长这类负载，Redis 是常见的选择：数据在内存里，单线程执行命令所以每条命令都是原子的，而且提供了多种数据结构，很多需求一两条命令就能完成。</p>
+
+<h2 id="goals"><span class="num">2</span>目标与非目标</h2>
+<div class="compare">
+  <div class="good">
+    <h4>目标</h4>
+    <ul>
+      <li>实现 10 个基于 Redis 的功能，覆盖 STRING、HASH、LIST、SET、ZSET 五种基础结构，以及 HyperLogLog、Bitmap、Stream 和 Lua 脚本</li>
+      <li>每个功能附带场景分析、选型理由、图示、代码、测试</li>
+      <li>每个功能一个 git tag，可以逐步回放</li>
+      <li>代码风格和原书保持一致，尽量少改原有代码</li>
+    </ul>
+  </div>
+  <div class="bad">
+    <h4>非目标</h4>
+    <ul>
+      <li>前端美化与 SPA 化（模板只做最小改动）</li>
+      <li>Redis 集群 / 哨兵部署（只在文档中讨论）</li>
+      <li>引入 Celery 等任务框架（直接用 Redis Stream 实现）</li>
+      <li>完整的用户注册体系（用 Django 自带登录 + 演示账号）</li>
+    </ul>
+  </div>
+</div>
+
+<h2 id="roles"><span class="num">3</span>用户角色</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart TB
+  subgraph 角色
+    V["👤 访客<br/>未登录"]
+    U["🧑‍💻 登录用户"]
+    A["✍️ 作者<br/>也是登录用户"]
+    O["🛠 运营 / 管理员"]
+  end
+  V -->|浏览 · 搜索 · 评论| F1["浏览量 · 热榜 · 推荐 · 热搜"]
+  U -->|互动| F2["点赞 · 签到 · 关注 · 时间线"]
+  A -->|接收反馈| F3["评论通知 · 粉丝"]
+  O -->|保障| F4["缓存 · 限流 · 数据回写"]
+  U -.继承.-> V
+  A -.继承.-> U
+  </pre></div>
+  <figcaption>图 1　四类角色和他们关心的功能</figcaption>
+</figure>
+
+<h2 id="features"><span class="num">4</span>功能总览</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+mindmap
+  root((博客 × Redis))
+    统计
+      浏览量 PV/UV
+      热门排行榜
+    性能
+      查询缓存
+      接口限流
+    互动
+      点赞
+      签到
+      关注与时间线
+    发现
+      个性化推荐
+      热搜与联想
+    消息
+      评论通知
+  </pre></div>
+  <figcaption>图 2　功能脑图：5 大类 10 个功能</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+  <thead><tr><th>#</th><th>功能</th><th>优先级</th><th>角色</th><th>Git Tag</th></tr></thead>
+  <tbody>
+    <tr><td>F0</td><td>接入 Redis（基础设施）</td><td>P0</td><td>—</td><td><code>step-02-redis-setup</code></td></tr>
+    <tr><td>F1</td><td>文章浏览量 PV / UV</td><td>P0</td><td>访客</td><td><code>step-03-page-views</code></td></tr>
+    <tr><td>F2</td><td>热门排行榜（总/日/周）</td><td>P0</td><td>访客</td><td><code>step-04-hot-ranking</code></td></tr>
+    <tr><td>F3</td><td>查询缓存</td><td>P0</td><td>运营</td><td><code>step-05-cache</code></td></tr>
+    <tr><td>F4</td><td>点赞</td><td>P1</td><td>登录用户</td><td><code>step-06-likes</code></td></tr>
+    <tr><td>F5</td><td>每日签到</td><td>P1</td><td>登录用户</td><td><code>step-07-checkin</code></td></tr>
+    <tr><td>F6</td><td>关注作者 &amp; 时间线</td><td>P1</td><td>登录用户 / 作者</td><td><code>step-08-follow-timeline</code></td></tr>
+    <tr><td>F7</td><td>个性化推荐</td><td>P1</td><td>访客</td><td><code>step-09-recommend</code></td></tr>
+    <tr><td>F8</td><td>评论 / 分享限流</td><td>P0</td><td>运营</td><td><code>step-10-rate-limit</code></td></tr>
+    <tr><td>F9</td><td>热搜、搜索历史、搜索联想</td><td>P2</td><td>访客</td><td><code>step-11-search</code></td></tr>
+    <tr><td>F10</td><td>评论通知</td><td>P2</td><td>作者</td><td><code>step-12-notifications</code></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="stories"><span class="num">5</span>用户故事与验收标准</h2>
+
+<h3 id="f1">F1 文章浏览量</h3>
+<p><strong>用户故事：</strong>作为读者，我想在文章页看到这篇文章被看过多少次、被多少人看过，以判断它是否值得读。</p>
+<ul>
+  <li>AC1 详情页展示「N 次浏览 · M 位读者」，列表页每篇文章展示浏览次数。</li>
+  <li>AC2 同一访客 30 分钟内反复刷新只计 1 次 PV。</li>
+  <li>AC3 UV 按访客去重（登录用户按用户 ID，匿名用户按 Session），允许 1% 以内误差。</li>
+  <li>AC4 浏览量定期回写数据库；Redis 数据丢失后，计数从数据库中的值继续累加，不会归零。</li>
+</ul>
+
+<h3 id="f2">F2 热门排行榜</h3>
+<p><strong>用户故事：</strong>作为读者，我想看到今天、本周、历史上最热的文章。</p>
+<ul>
+  <li>AC1 侧边栏展示「本周热门」前 5；独立页面 <code>/blog/ranking/</code> 展示总榜、日榜、周榜各前 10，显示热度值。</li>
+  <li>AC2 热度 = 去重后的浏览次数，实时更新。</li>
+  <li>AC3 日榜数据只保留 8 天，过期自动清理。</li>
+  <li>AC4 下线或删除的文章不出现在榜单上。</li>
+</ul>
+
+<h3 id="f3">F3 查询缓存</h3>
+<p><strong>用户故事：</strong>作为运营，我希望访问量上涨时数据库压力不跟着线性上涨。</p>
+<ul>
+  <li>AC1 侧边栏数据、文章详情、相似文章走缓存，命中时不查库。</li>
+  <li>AC2 文章或评论变化后，相关缓存立即失效，读者看到的是新数据。</li>
+  <li>AC3 访问不存在的文章不会每次都穿透到数据库（缓存穿透）。</li>
+  <li>AC4 热点缓存过期瞬间只有一个请求回源（缓存击穿）；缓存过期时间带随机抖动（缓存雪崩）。</li>
+</ul>
+
+<h3 id="f4">F4 点赞</h3>
+<p><strong>用户故事：</strong>作为登录用户，我想给喜欢的文章点赞，也可以取消；我想看到自己赞过哪些文章。</p>
+<ul>
+  <li>AC1 每人对每篇文章最多点赞 1 次，重复提交结果不变（幂等）。</li>
+  <li>AC2 详情页展示点赞数，以及我是否已赞（按钮显示「点赞」或「取消点赞」）。</li>
+  <li>AC3 「我的点赞」页面按点赞时间倒序列出文章。</li>
+  <li>AC4 未登录用户点赞时跳转到登录页。</li>
+</ul>
+
+<h3 id="f5">F5 每日签到</h3>
+<p><strong>用户故事：</strong>作为登录用户，我每天来签到，想看到本月签到日历和连续签到天数。</p>
+<ul>
+  <li>AC1 每天只能签到 1 次，重复签到提示「今天已签到」。</li>
+  <li>AC2 页面展示本月日历（已签到的日期高亮）、本月签到天数、连续签到天数。</li>
+  <li>AC3 展示今日全站签到人数，以及最近 7 天每天都签到的人数。</li>
+  <li>AC4 连续签到跨月也能正确累计；展示累计签到天数和积分（每天 +1，连续 7 天额外 +5）。</li>
+  <li>AC5 存储开销：签到日历每用户每月不超过 4 字节。</li>
+</ul>
+
+<h3 id="f6">F6 关注 &amp; 时间线</h3>
+<p><strong>用户故事：</strong>作为读者，我想关注喜欢的作者，并在一个页面按时间看到他们的新文章。</p>
+<ul>
+  <li>AC1 文章详情页可以关注或取消关注作者，展示作者的粉丝数。</li>
+  <li>AC2 作者发布文章后，所有粉丝的时间线立刻出现这篇文章。</li>
+  <li>AC3 新关注一个作者时，他最近的文章会补进我的时间线；取消关注后，他的文章从时间线移除。</li>
+  <li>AC4 时间线使用游标分页，翻页时有新文章发布也不会出现重复或遗漏。</li>
+  <li>AC5 展示我和某作者的共同关注。</li>
+</ul>
+
+<h3 id="f7">F7 个性化推荐</h3>
+<p><strong>用户故事：</strong>作为读者，我想看到和我兴趣相关、但我还没读过的文章。</p>
+<ul>
+  <li>AC1 根据我读过的文章的标签计算兴趣，按兴趣加权推荐。</li>
+  <li>AC2 推荐结果不包含已读文章。</li>
+  <li>AC3 新访客（冷启动）推荐结果用热榜补齐。</li>
+  <li>AC4 推荐结果缓存 60 秒，避免每次请求都重新计算。</li>
+</ul>
+
+<h3 id="f8">F8 限流</h3>
+<p><strong>用户故事：</strong>作为运营，我要防止有人用脚本刷评论、批量发分享邮件。</p>
+<ul>
+  <li>AC1 同一 IP 每分钟最多发 3 条评论（滑动窗口）。</li>
+  <li>AC2 同一 IP 每小时最多发 5 封分享邮件（固定窗口）。</li>
+  <li>AC3 超过限制返回 HTTP 429，并提示多少秒后可以重试。</li>
+  <li>AC4 计数在高并发下准确（原子操作）。</li>
+</ul>
+
+<h3 id="f9">F9 搜索增强</h3>
+<p><strong>用户故事：</strong>作为读者，我想知道大家都在搜什么，能快速重复自己之前的搜索，输入时有联想提示。</p>
+<ul>
+  <li>AC1 搜索页展示热搜榜前 10。</li>
+  <li>AC2 展示我最近的 10 条搜索，去重，最新的在前。</li>
+  <li>AC3 输入关键词前缀时，返回标题以该前缀开头的文章（最多 8 条）。</li>
+</ul>
+
+<h3 id="f10">F10 评论通知</h3>
+<p><strong>用户故事：</strong>作为作者，我想在有人评论我的文章时收到站内通知。</p>
+<ul>
+  <li>AC1 评论提交后立即返回，通知由后台进程异步处理，不阻塞用户。</li>
+  <li>AC2 侧边栏展示未读通知数，进入通知页后清零。</li>
+  <li>AC3 后台进程崩溃重启后，未处理完的消息不丢失，会被重新处理。</li>
+  <li>AC4 每个作者最多保留最近 50 条通知。</li>
+</ul>
+
+<h2 id="journey"><span class="num">6</span>典型用户旅程</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+journey
+  title 一位读者的一天
+  section 早上
+    登录并签到: 5: 读者
+    查看关注作者的时间线: 4: 读者
+  section 中午
+    浏览本周热榜: 4: 读者
+    阅读文章（PV+1，兴趣+1）: 5: 读者
+    点赞: 5: 读者
+  section 晚上
+    搜索 redis（热搜+1）: 3: 读者
+    点开推荐文章: 4: 读者
+    发表评论（限流 + 通知作者）: 4: 读者, 作者
+  </pre></div>
+  <figcaption>图 3　读者一天的使用路径，以及每一步涉及的功能</figcaption>
+</figure>
+
+<h2 id="nfr"><span class="num">7</span>非功能需求</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>要求</th><th>实现方式</th></tr></thead>
+  <tbody>
+    <tr><td>性能</td><td>单次请求中所有 Redis 操作合计 &lt; 5ms</td><td>使用 pipeline 合并命令、MGET 批量读取，避免循环里逐条请求</td></tr>
+    <tr><td>原子性</td><td>计数、限流在并发下准确</td><td>依赖 Redis 单线程执行命令；多条命令用 Lua 或 MULTI 包装</td></tr>
+    <tr><td>内存</td><td>所有临时数据都要设过期时间</td><td>Key 规范中写明 TTL，测试里断言 TTL</td></tr>
+    <tr><td>可靠性</td><td>Redis 数据丢失不影响核心阅读功能</td><td>浏览量回写数据库；索引类数据提供 rebuild 命令</td></tr>
+    <tr><td>可测试性</td><td>每个功能有自动化测试</td><td>测试使用独立的 Redis DB，每个用例前清空</td></tr>
+    <tr><td>可读性</td><td>代码适合教学</td><td>每个功能一个 service 模块，所有 Key 集中定义在 <code>redis_keys.py</code></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="milestones"><span class="num">8</span>里程碑</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+gantt
+  dateFormat X
+  axisFormat %s
+  title 按 tag 推进（单位：章节）
+  section 准备
+  文档 PRD/设计      :done, 0, 1
+  接入 Redis          :done, 1, 2
+  section 统计与性能
+  浏览量              :done, 2, 3
+  排行榜              :done, 3, 4
+  缓存                :done, 4, 5
+  section 互动
+  点赞                :done, 5, 6
+  签到                :done, 6, 7
+  关注时间线          :done, 7, 8
+  section 发现与保障
+  推荐                :done, 8, 9
+  限流                :done, 9, 10
+  搜索                :done, 10, 11
+  通知                :done, 11, 12
+  </pre></div>
+  <figcaption>图 4　开发顺序：后面的功能会复用前面的能力（比如推荐会用到排行榜做兜底）</figcaption>
+</figure>
+
+<div class="pager">
+  <a href="index.html"><small>上一篇</small>首页</a>
+  <a class="next" href="02-design.html"><small>下一篇</small>系统设计文档 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>
