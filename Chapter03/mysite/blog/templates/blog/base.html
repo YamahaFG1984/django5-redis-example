@@ -48,6 +48,15 @@
         <li>No views yet.</li>
       {% endfor %}
     </ol>
+    <h3>Recommended for you</h3>
+    {% get_recommendations 5 as recommended_posts %}
+    <ul>
+      {% for post in recommended_posts %}
+        <li><a href="{{ post.get_absolute_url }}">{{ post.title }}</a></li>
+      {% empty %}
+        <li>Read a few posts and we'll find more for you.</li>
+      {% endfor %}
+    </ul>
     <h3>Latest posts</h3>
     {% show_latest_posts 3 %}
     <h3>Most commented posts</h3>

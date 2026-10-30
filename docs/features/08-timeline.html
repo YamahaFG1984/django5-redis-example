@@ -290,6 +290,9 @@ def post_saved(sender, instance, **kwargs):
         cache_service.invalidate_post(instance._old)
     cache_service.invalidate_sidebar()
 
+    # step-09 更新标签倒排索引（下线的文章会被移出）
+    recommend.index_post(instance)
+
     if instance.status == Post.Status.PUBLISHED:
         # step-08 推送到粉丝的时间线
         timeline.publish(instance)

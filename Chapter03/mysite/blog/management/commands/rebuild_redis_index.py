@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 
-from blog.services import timeline
+from blog.services import recommend, timeline
 
 
 class Command(BaseCommand):
@@ -9,4 +9,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         timeline.rebuild_outboxes()
         self.stdout.write('  step-08 author outboxes rebuilt')
+        recommend.rebuild_index()
+        self.stdout.write('  step-09 tag -> posts index rebuilt')
         self.stdout.write(self.style.SUCCESS('Done.'))

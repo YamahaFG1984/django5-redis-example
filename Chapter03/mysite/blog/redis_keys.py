@@ -124,3 +124,29 @@ def user_posts(user_id):
 def timeline(user_id):
     """ZSET  用户的收件箱（时间线），最多保留 500 条"""
     return _k('timeline', user_id)
+
+
+# ---------------------------------------------------------------- step-09 推荐
+def tag_posts(tag_slug):
+    """SET  倒排索引：标签 → 已发布文章 ID"""
+    return _k('tag', tag_slug, 'posts')
+
+
+def post_tags(post_id):
+    """SET  正排：文章 → 标签 slug，用来计算标签的增删"""
+    return _k('post', post_id, 'tags')
+
+
+def visitor_interests(visitor_id):
+    """ZSET  兴趣画像：member = 标签 slug，score = 读过的该标签文章数，TTL 30 天"""
+    return _k('visitor', visitor_id, 'interests')
+
+
+def visitor_read(visitor_id):
+    """SET  读过的文章 ID，TTL 30 天"""
+    return _k('visitor', visitor_id, 'read')
+
+
+def recommend_result(visitor_id):
+    """ZSET  推荐结果缓存：member = 文章 ID，score = 推荐分，TTL 60 秒"""
+    return _k('recommend', visitor_id)

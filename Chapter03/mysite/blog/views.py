@@ -19,7 +19,7 @@ from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
-from .services import checkin, likes, pageviews, ranking, timeline
+from .services import checkin, likes, pageviews, ranking, recommend, timeline
 from .visitors import get_visitor_id
 
 
@@ -65,6 +65,8 @@ def post_detail(request, year, month, day, post):
     if pageviews.record_view(post, visitor_id):
         # Redis: only counted views raise the post in the rankings
         ranking.record_view(post.id)
+    # Redis: update the visitor's interest profile for recommendations
+    recommend.record_read(visitor_id, post.id)
 
     # List of active comments for this post
     comments = post.comments.filter(active=True)

@@ -5,7 +5,8 @@ from django.utils.safestring import mark_safe
 
 from ..models import Post
 from ..services import cache as cache_service
-from ..services import ranking
+from ..services import ranking, recommend
+from ..visitors import get_visitor_id
 
 register = template.Library()
 
@@ -41,6 +42,14 @@ def get_most_commented_posts(count=5):
 @register.simple_tag
 def get_hot_posts(period='week', count=5):
     return ranking.top_posts(period, count)
+
+
+@register.simple_tag(takes_context=True)
+def get_recommendations(context, count=5):
+    request = context.get('request')
+    if request is None:
+        return []
+    return recommend.recommend_posts(get_visitor_id(request), count)
 
 
 @register.filter(name='markdown')

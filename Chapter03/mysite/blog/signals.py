@@ -1,12 +1,12 @@
 """
 模型变化时同步 Redis 中的派生数据。每一章在这里添加自己的处理函数。
 """
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 from .models import Comment, Post
 from .services import cache as cache_service
-from .services import likes, ranking, timeline
+from .services import likes, ranking, recommend, timeline
 
 
 @receiver(pre_save, sender=Post)
@@ -22,6 +22,9 @@ def post_saved(sender, instance, **kwargs):
     if getattr(instance, '_old', None) is not None:
         cache_service.invalidate_post(instance._old)
     cache_service.invalidate_sidebar()
+
+    # step-09 更新标签倒排索引（下线的文章会被移出）
+    recommend.index_post(instance)
 
     if instance.status == Post.Status.PUBLISHED:
         # step-08 推送到粉丝的时间线
@@ -42,6 +45,15 @@ def post_deleted(sender, instance, **kwargs):
     likes.remove_post(instance.id)
     # step-08 从时间线移除
     timeline.unpublish(instance)
+    # step-09 移出标签索引
+    recommend.remove_post(instance.id)
+
+
+@receiver(m2m_changed, sender=Post.tags.through)
+def post_tags_changed(sender, instance, action, **kwargs):
+    # step-09 Admin 中先保存文章、再保存标签，所以标签变化要单独处理
+    if action in ('post_add', 'post_remove', 'post_clear') and isinstance(instance, Post):
+        recommend.index_post(instance)
 
 
 @receiver([post_save, post_delete], sender=Comment)

@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个性化推荐</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 09 · 集合运算</div>
+  <h1>个性化推荐：兴趣画像 × 标签倒排 × 加权并集</h1>
+  <p class="lead">不需要机器学习，用 Redis 的集合运算就能做一个可用的基于内容的推荐：读过什么标签就记下兴趣，按兴趣分给标签下的文章加权求和，去掉读过的，不够再用热榜补齐。整个计算在 Redis 内部用 3 条命令完成。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-09-recommend</span>
+    <span class="t zset">ZSET</span><span class="t set">SET</span>
+  </div>
+</section>
+
+<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<p>PRD F7：根据读过文章的标签推荐相关文章；不推荐已读的；新访客用热榜补齐；结果缓存 60 秒。</p>
+<p>原书第 3 章的「相似文章」是按当前这一篇文章的标签用 SQL 计算的（<code>Count('tags')</code>），只和当前文章有关，与读者是谁无关。个性化推荐需要考虑读者的全部阅读历史，用 SQL 做要关联阅读日志、文章、标签三张表，每个请求都算一遍代价太高。</p>
+
+<h2 id="algo"><span class="num">2</span>算法：一张图看懂</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph P["① 兴趣画像 ZSET"]
+    I["visitor:u:2:interests<br/>redis → 2<br/>performance → 1<br/>database → 1"]
+  end
+  subgraph T["② 标签倒排 SET"]
+    TR["tag:redis:posts<br/>{1, 2, 5, 9, 11, 12}"]
+    TP["tag:performance:posts<br/>{2, 4, 5, 10}"]
+    TD["tag:database:posts<br/>{1, 3, 8, 12}"]
+  end
+  I -->|权重 2| U
+  TR --> U
+  I -->|权重 1| U
+  TP --> U
+  I -->|权重 1| U
+  TD --> U
+  U(["③ ZUNIONSTORE<br/>WEIGHTS 2 1 1"]) --> S["2 → 3 · 12 → 3 · 5 → 3<br/>9 → 2 · 11 → 2 · 1 → 3<br/>4 → 1 · 10 → 1 · 3 → 1 · 8 → 1"]
+  S --> D(["④ ZDIFFSTORE<br/>减去 已读 {1, 5}"])
+  D --> R["recommend:u:2（TTL 60s）<br/>2 → 3 · 12 → 3 · 9 → 2 · 11 → 2 …"]
+  </pre></div>
+  <figcaption>图 1　推荐的完整计算：文章得分 = 它所属标签的兴趣分之和</figcaption>
+</figure>
+<div class="callout info">
+  <span class="label">SET 也能参与 ZUNIONSTORE</span>
+  <p>ZUNIONSTORE、ZINTERSTORE、ZDIFFSTORE 的输入可以是普通 SET，SET 中每个元素的 score 视为 1。乘上 <code>WEIGHTS</code> 中对应的权重，就是「这个标签的兴趣分」。所以倒排索引用 SET 就够了，不需要额外存分数。</p>
+</div>
+
+<h2 id="keys"><span class="num">3</span>Key 设计</h2>
+<div class="keys">
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:tag:redis:posts</code><span class="ttl">∞</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">1</span><span class="chip">2</span><span class="chip">5</span><span class="chip">9</span><span class="chip">11</span><span class="chip">12</span></div></div>
+    <div class="rk-note">倒排：标签 → 已发布文章。模式 A，可以从数据库重建。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:post:2:tags</code><span class="ttl">∞</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">redis</span><span class="chip">performance</span></div></div>
+    <div class="rk-note">正排：用于计算标签增删，阅读时也从这里取标签，不用查数据库。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:visitor:u:2:interests</code><span class="ttl">30d</span></div>
+    <div class="rk-body">
+      <div class="row"><span>redis</span><span class="score">2</span></div>
+      <div class="row"><span>performance</span><span class="score">1</span></div>
+      <div class="row"><span>database</span><span class="score">1</span></div>
+    </div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t set">SET</span><code>blog:visitor:u:2:read</code><span class="ttl">30d</span></div>
+    <div class="rk-body"><div class="chips"><span class="chip">1</span><span class="chip">5</span></div></div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t zset">ZSET</span><code>blog:recommend:u:2</code><span class="ttl">60s</span></div>
+    <div class="rk-body">
+      <div class="row"><span>2</span><span class="score">3</span></div>
+      <div class="row"><span>12</span><span class="score">3</span></div>
+      <div class="row"><span>9</span><span class="score">2</span></div>
+    </div>
+    <div class="rk-note">计算结果本身就是缓存。</div>
+  </div>
+</div>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-09"># ---------------------------------------------------------------- step-09 推荐
+def tag_posts(tag_slug):
+    """SET  倒排索引：标签 → 已发布文章 ID"""
+    return _k('tag', tag_slug, 'posts')
+
+
+def post_tags(post_id):
+    """SET  正排：文章 → 标签 slug，用来计算标签的增删"""
+    return _k('post', post_id, 'tags')
+
+
+def visitor_interests(visitor_id):
+    """ZSET  兴趣画像：member = 标签 slug，score = 读过的该标签文章数，TTL 30 天"""
+    return _k('visitor', visitor_id, 'interests')
+
+
+def visitor_read(visitor_id):
+    """SET  读过的文章 ID，TTL 30 天"""
+    return _k('visitor', visitor_id, 'read')
+
+
+def recommend_result(visitor_id):
+    """ZSET  推荐结果缓存：member = 文章 ID，score = 推荐分，TTL 60 秒"""
+    return _k('recommend', visitor_id)</code></pre>
+
+<h2 id="flow"><span class="num">4</span>流程</h2>
+<h3 id="flow-index">4.1 维护倒排索引</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant A as Admin
+  participant S as signals
+  participant R as Redis
+  A->>S: post_save（先保存文章本身）
+  S->>R: index_post：SMEMBERS post:2:tags → 旧标签 {redis}
+  Note over S: 数据库中的新标签 {redis}（这时还没变）
+  A->>S: m2m_changed post_add（再保存标签）
+  S->>R: SMEMBERS post:2:tags → 旧 {redis}
+  Note over S: 新 {redis, performance}<br/>要加：performance　要删：无
+  S->>R: SADD tag:performance:posts 2<br/>DEL post:2:tags · SADD post:2:tags redis performance
+  </pre></div>
+  <figcaption>图 2　Admin 保存文章分两步（先文章、后标签），所以要同时监听 post_save 和 m2m_changed。正排集合用来计算新旧标签的差</figcaption>
+</figure>
+
+<h3 id="flow-read">4.2 阅读与推荐</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant V as post_detail
+  participant T as 侧边栏 get_recommendations
+  participant R as Redis
+  V->>R: SMEMBERS post:9:tags → {redis, queue}
+  V->>R: MULTI · ZINCRBY interests 1 redis · ZINCRBY interests 1 queue<br/>SADD read 9 · EXPIRE ×2 · DEL recommend:u:2 · EXEC
+  T->>R: EXISTS recommend:u:2 → 0
+  T->>R: ZREVRANGE interests 0 4 WITHSCORES
+  T->>R: MULTI · ZUNIONSTORE … WEIGHTS … · ZDIFFSTORE … · EXPIRE 60 · EXEC
+  T->>R: ZREVRANGE recommend:u:2 0 4
+  alt 不足 5 篇
+    T->>R: ZREVRANGE rank:views:total 0 14
+    T->>R: SMISMEMBER read 候选文章 → 过滤掉已读
+  end
+  T->>T: Post.published.in_bulk(ids)
+  </pre></div>
+  <figcaption>图 3　读一篇文章会让推荐缓存失效，所以侧边栏会马上排除刚读过的这篇</figcaption>
+</figure>
+
+<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
+<pre class="cli"><code><span class="prompt">&gt; </span>SADD demo:tag:redis 1 2 5
+<span class="prompt">&gt; </span>SADD demo:tag:perf 2 4
+<span class="prompt">&gt; </span>ZUNIONSTORE demo:rec 2 demo:tag:redis demo:tag:perf WEIGHTS 2 1
+<span class="out">(integer) 4</span>
+<span class="prompt">&gt; </span>ZREVRANGE demo:rec 0 -1 WITHSCORES
+<span class="out">1) "2" 2) "3"     <span class="cmt">← 两个标签都有：2 + 1</span>
+3) "5" 4) "2"
+5) "1" 6) "2"
+7) "4" 8) "1"</span>
+<span class="prompt">&gt; </span>SADD demo:read 2
+<span class="prompt">&gt; </span>ZDIFFSTORE demo:rec 2 demo:rec demo:read      <span class="cmt"># 目标 Key 也可以是输入之一</span>
+<span class="out">(integer) 3</span>
+<span class="prompt">&gt; </span>ZINTERSTORE demo:both 2 demo:tag:redis demo:tag:perf   <span class="cmt"># 同时带两个标签的文章</span>
+<span class="prompt">&gt; </span>SMISMEMBER demo:read 1 2 3
+<span class="out">1) (integer) 0 2) (integer) 1 3) (integer) 0</span></code></pre>
+
+<h2 id="code"><span class="num">6</span>代码实现</h2>
+<h3 id="code-index">6.1 倒排索引</h3>
+<pre data-file="Chapter03/mysite/blog/services/recommend.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/recommend.py::_sync_index">def _sync_index(post_id, new_tags):
+    r = get_redis()
+    old_tags = r.smembers(K.post_tags(post_id))
+    pipe = r.pipeline()
+    for slug in old_tags - new_tags:
+        pipe.srem(K.tag_posts(slug), post_id)
+    for slug in new_tags - old_tags:
+        pipe.sadd(K.tag_posts(slug), post_id)
+    pipe.delete(K.post_tags(post_id))
+    if new_tags:
+        pipe.sadd(K.post_tags(post_id), *new_tags)
+    pipe.execute()</code></pre>
+<pre data-file="Chapter03/mysite/blog/signals.py"><code class="language-python" data-include="Chapter03/mysite/blog/signals.py::post_tags_changed">@receiver(m2m_changed, sender=Post.tags.through)
+def post_tags_changed(sender, instance, action, **kwargs):
+    # step-09 Admin 中先保存文章、再保存标签，所以标签变化要单独处理
+    if action in ('post_add', 'post_remove', 'post_clear') and isinstance(instance, Post):
+        recommend.index_post(instance)</code></pre>
+<h3 id="code-read">6.2 记录阅读</h3>
+<pre data-file="Chapter03/mysite/blog/services/recommend.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/recommend.py::record_read">def record_read(visitor_id, post_id):
+    """记录一次阅读：更新兴趣画像和已读集合，并让旧的推荐结果失效。"""
+    r = get_redis()
+    tags = r.smembers(K.post_tags(post_id))   # 直接从 Redis 取标签，不查数据库
+    interests = K.visitor_interests(visitor_id)
+    read = K.visitor_read(visitor_id)
+    pipe = r.pipeline()
+    for slug in tags:
+        pipe.zincrby(interests, 1, slug)
+    pipe.sadd(read, post_id)
+    pipe.expire(interests, PROFILE_TTL)
+    pipe.expire(read, PROFILE_TTL)
+    pipe.delete(K.recommend_result(visitor_id))
+    pipe.execute()</code></pre>
+<h3 id="code-rec">6.3 计算推荐</h3>
+<pre data-file="Chapter03/mysite/blog/services/recommend.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/recommend.py::_compute">def _compute(r, visitor_id):
+    """用兴趣最高的标签计算推荐结果，写入 blog:recommend:{vid}。"""
+    result = K.recommend_result(visitor_id)
+    tags = top_interests(visitor_id)
+    if not tags:
+        return
+    pipe = r.pipeline()
+    # 加权并集：一篇文章的分 = 它所属的每个标签的兴趣分之和
+    # （SET 作为 ZUNIONSTORE 的输入时，每个元素的 score 视为 1）
+    pipe.zunionstore(result, {K.tag_posts(slug): score for slug, score in tags})
+    # 差集：去掉读过的文章（ZDIFFSTORE 也接受普通 SET 作为输入）
+    pipe.zdiffstore(result, [result, K.visitor_read(visitor_id)])
+    pipe.expire(result, RESULT_TTL)
+    pipe.execute()</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/recommend.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/recommend.py::recommend_ids">def recommend_ids(visitor_id, count=5):
+    r = get_redis()
+    result = K.recommend_result(visitor_id)
+    if not r.exists(result):
+        _compute(r, visitor_id)
+    ids = [int(m) for m in r.zrevrange(result, 0, count - 1)]
+
+    if len(ids) &lt; count:
+        # 冷启动 / 兴趣标签下的文章都读完了：用总榜补齐
+        candidates = [
+            post_id for post_id, _ in ranking.top_ids('total', count * 3)
+            if post_id not in ids
+        ]
+        if candidates:
+            already_read = r.smismember(K.visitor_read(visitor_id), candidates)
+            ids += [
+                post_id for post_id, seen in zip(candidates, already_read) if not seen
+            ][: count - len(ids)]
+    return ids</code></pre>
+<h3 id="code-tag">6.4 模板标签</h3>
+<pre data-file="Chapter03/mysite/blog/templatetags/blog_tags.py"><code class="language-python" data-include="Chapter03/mysite/blog/templatetags/blog_tags.py::get_recommendations">@register.simple_tag(takes_context=True)
+def get_recommendations(context, count=5):
+    request = context.get('request')
+    if request is None:
+        return []
+    return recommend.recommend_posts(get_visitor_id(request), count)</code></pre>
+
+<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<ol class="steps">
+  <li>执行 <code>python manage.py rebuild_redis_index</code>，为之前的演示数据建立标签索引。</li>
+  <li>用无痕窗口（新访客）打开首页，侧边栏「Recommended for you」显示的是热榜（冷启动）。</li>
+  <li>连续读两篇带 redis 标签的文章，观察推荐列表的变化：redis 标签的文章排到了前面，读过的文章不再出现。</li>
+  <li>
+    <p>在 redis-cli 中查看访客画像（匿名访客的 ID 是 <code>s:</code> + sessionid cookie 的值）：</p>
+<pre class="cli"><code><span class="prompt">&gt; </span>ZREVRANGE blog:visitor:s:&lt;sessionid&gt;:interests 0 -1 WITHSCORES
+<span class="prompt">&gt; </span>ZREVRANGE blog:recommend:s:&lt;sessionid&gt; 0 -1 WITHSCORES
+<span class="prompt">&gt; </span>TTL blog:recommend:s:&lt;sessionid&gt;</code></pre>
+  </li>
+</ol>
+
+<h2 id="think"><span class="num">8</span>边界与思考</h2>
+<div class="callout warn">
+  <span class="label">本实现的取舍</span>
+  <ul>
+    <li><strong>兴趣不会衰减</strong>：一个月前读的和今天读的权重一样，只有 30 天不访问才整体过期。可以定期把所有分数乘以 0.9（ZUNIONSTORE 单个输入时配合 <code>WEIGHTS 0.9</code>），或者把时间编码进分数。</li>
+    <li><strong>热门标签占优</strong>：标签下文章越多，命中越多。可以按 TF-IDF 的思路，用「标签下文章数」的倒数调整权重。</li>
+    <li><strong>每次阅读都会让缓存失效</strong>：一个访客连续阅读时，每次都要重新计算。计算量很小（只涉及几个集合），如果标签集合很大，可以不在阅读时删除缓存，而是等 TTL 过期。</li>
+  </ul>
+</div>
+<div class="callout think">
+  <span class="label">思考题</span>
+  <ol>
+    <li>「看了这篇的人还看了」（协同过滤）怎么用 Redis 做？（提示：每篇文章一个 ZSET，读者同时读了 A 和 B 就 <code>ZINCRBY co:A 1 B</code>）</li>
+    <li>匿名访客登录后，访客 ID 从 <code>s:xxx</code> 变成 <code>u:3</code>，兴趣画像怎么合并？（提示：<code>ZUNIONSTORE</code> 两个画像）</li>
+    <li>为什么推荐结果要在 Python 里再用 <code>Post.published.in_bulk</code> 过滤一次？什么情况下索引里会有已下线的文章？</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="08-timeline.html"><small>上一篇</small>← step-08 关注与时间线</a>
+  <a class="next" href="10-rate-limit.html"><small>下一篇</small>step-10 接口限流 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>
