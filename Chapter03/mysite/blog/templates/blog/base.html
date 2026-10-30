@@ -13,6 +13,17 @@
   </div>
   <div id="sidebar">
     <h2>My blog</h2>
+    <p class="user-box">
+      {% if user.is_authenticated %}
+        Hi, <strong>{{ user.username }}</strong>
+        <form class="inline-form" action="{% url "logout" %}" method="post">
+          {% csrf_token %}
+          <input type="submit" value="Log out">
+        </form>
+      {% else %}
+        <a href="{% url "login" %}?next={{ request.path }}">Log in</a>
+      {% endif %}
+    </p>
     <p>
       This is my blog.
       I've written {% total_posts %} posts so far.

@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接入 Redis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 02 · 基础设施</div>
+  <h1>接入 Redis：连接池、Key 规范、测试基类</h1>
+  <p class="lead">后面每个功能都要用到 Redis。这一章把它接入项目：起一个 Redis 服务，写好获取连接的方法，定好 Key 的命名规范，准备测试基类和演示数据。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-02-redis-setup</span>
+    <span class="pill">redis-py 5.2</span>
+  </div>
+</section>
+
+<h2 id="goal"><span class="num">1</span>本章要做的事</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>改动</th><th>文件</th><th>目的</th></tr></thead>
+  <tbody>
+    <tr><td>新增 redis 服务</td><td><code>docker-compose.yml</code></td><td>开启 AOF 持久化，挂载数据卷</td></tr>
+    <tr><td>新增依赖</td><td><code>requirements.txt</code></td><td><code>redis==5.2.1</code>（redis-py 客户端）</td></tr>
+    <tr><td>新增配置</td><td><code>settings.py</code></td><td><code>REDIS_URL</code>、<code>REDIS_KEY_PREFIX</code>、登录跳转</td></tr>
+    <tr><td>连接管理</td><td><code>blog/redis_client.py</code></td><td>全局连接池 + <code>get_redis()</code></td></tr>
+    <tr><td>Key 规范</td><td><code>blog/redis_keys.py</code></td><td>所有 Key 的唯一出处</td></tr>
+    <tr><td>测试基类</td><td><code>blog/tests/base.py</code></td><td>使用 db15，每个用例前清空</td></tr>
+    <tr><td>登录</td><td><code>urls.py</code>、<code>registration/login.html</code></td><td>后面点赞、签到、关注需要登录用户</td></tr>
+    <tr><td>演示数据</td><td><code>seed_demo</code> 命令</td><td>3 个作者、13 篇文章</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="compose"><span class="num">2</span>启动 Redis 服务</h2>
+<p>在 <code>docker-compose.yml</code> 里加一个 redis 服务，并给 Django 服务加上 <code>REDIS_URL</code> 环境变量。容器之间通过服务名 <code>redis</code> 访问。</p>
+<pre data-file="Chapter03/docker-compose.yml"><code class="language-yaml">  redis:
+    image: redis:7.4-alpine
+    restart: always
+    # appendonly: 开启 AOF 持久化，每秒刷盘一次，重启后数据还在
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data</code></pre>
+
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph mem["Redis 进程（内存）"]
+    D["数据集"]
+  end
+  W["写命令<br/>INCR / SADD ..."] --> D
+  D -->|每条写命令追加到缓冲区| BUF["AOF 缓冲区"]
+  BUF -->|everysec：每秒 fsync 一次| AOF[("appendonly.aof<br/>磁盘")]
+  AOF -.重启时按顺序重放.-> D
+  </pre></div>
+  <figcaption>图 1　AOF 持久化：把写命令追加到日志文件，重启时重放。<code>everysec</code> 最多丢失 1 秒的数据</figcaption>
+</figure>
+
+<div class="callout info">
+  <span class="label">RDB 还是 AOF？</span>
+  <p>Redis 默认使用 RDB 快照（隔一段时间把整个数据集写到磁盘），两次快照之间的数据宕机就丢了。本项目里点赞、关注、签到只存在 Redis（见设计文档「模式 C」），所以开启 AOF。生产环境一般两者同时开启：AOF 保证尽量少丢数据，RDB 用来备份和快速恢复。</p>
+</div>
+
+<h2 id="client"><span class="num">3</span>连接池：<code>redis_client.py</code></h2>
+<h3 id="why-pool">3.1 为什么需要连接池</h3>
+<p>每次请求都新建 TCP 连接的话，三次握手和认证的耗时往往比执行命令本身还长。连接池在进程内维护一组已经建好的连接，用的时候借出，用完归还。</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant V1 as 请求 A（线程 1）
+  participant V2 as 请求 B（线程 2）
+  participant P as ConnectionPool
+  participant R as Redis
+  V1->>P: get_redis().incr(...)
+  P->>P: 没有空闲连接，新建 conn#1
+  P->>R: INCR（conn#1）
+  R-->>P: 1
+  P-->>V1: 1，conn#1 归还到池中
+  V2->>P: get_redis().get(...)
+  P->>P: 复用空闲的 conn#1
+  P->>R: GET（conn#1）
+  R-->>V2: "1"
+  </pre></div>
+  <figcaption>图 2　连接池复用连接：第二个请求不需要重新建立 TCP 连接</figcaption>
+</figure>
+
+<h3 id="client-code">3.2 代码</h3>
+<pre data-file="Chapter03/mysite/blog/redis_client.py"><code class="language-python" data-include="Chapter03/mysite/blog/redis_client.py">"""
+Redis 连接管理。
+
+整个进程共享一个连接池（ConnectionPool）。get_redis() 每次返回一个新的
+Redis 对象，但它很轻量，真正的 TCP 连接由连接池负责复用。
+"""
+import redis
+from django.conf import settings
+from django.core.signals import setting_changed
+from django.dispatch import receiver
+
+_pool = None
+
+
+def get_redis():
+    global _pool
+    if _pool is None:
+        _pool = redis.ConnectionPool.from_url(
+            settings.REDIS_URL,
+            # 让命令返回 str 而不是 bytes，模板和业务代码里更方便
+            decode_responses=True,
+        )
+    return redis.Redis(connection_pool=_pool)
+
+
+def reset_pool():
+    """断开并丢弃连接池，下次 get_redis() 时按最新配置重建。"""
+    global _pool
+    if _pool is not None:
+        _pool.disconnect()
+    _pool = None
+
+
+@receiver(setting_changed)
+def _on_setting_changed(setting, **kwargs):
+    # 测试里用 override_settings 切换 REDIS_URL 时，让连接池跟着切换
+    if setting == 'REDIS_URL':
+        reset_pool()</code></pre>
+<ul>
+  <li><strong>延迟创建</strong>：第一次调用 <code>get_redis()</code> 时才创建连接池，导入模块时不会连接 Redis。</li>
+  <li><strong><code>decode_responses=True</code></strong>：redis-py 默认返回 <code>bytes</code>（<code>b'42'</code>），开启后返回 <code>str</code>。代价是二进制数据（比如用 <code>GET</code> 读 Bitmap）不能再直接读取，第 7 章会遇到，到时用 <code>BITFIELD</code> 解决。</li>
+  <li><strong>监听 <code>setting_changed</code></strong>：测试里用 <code>override_settings</code> 把 <code>REDIS_URL</code> 换成 db15 时，连接池会自动重建。</li>
+</ul>
+
+<div class="callout tip">
+  <span class="label">为什么不用 django-redis？</span>
+  <p>django-redis 是常用的第三方库，但 Django 4.0 起已经内置了 <code>RedisCache</code> 后端（第 5 章使用）。对于业务数据，直接用 redis-py 能调用全部命令，学习时也更直观。</p>
+</div>
+
+<h2 id="keys"><span class="num">4</span>Key 规范：<code>redis_keys.py</code></h2>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py">"""
+所有 Redis Key 的唯一出处。
+
+命名规则：{前缀}:{实体}:{ID}:{属性}，例如 blog:post:42:views
+业务代码里不要手写 Key 字符串，统一调用这里的函数。
+每一章新增的 Key 都追加在本文件中，读这个文件就能知道 Redis 里存了什么。
+"""
+from django.conf import settings
+
+
+def _k(*parts):
+    return ':'.join([settings.REDIS_KEY_PREFIX, *map(str, parts)])</code></pre>
+<p>这一章只有一个辅助函数 <code>_k()</code>。从下一章开始，每个功能都会在这里添加自己的 Key 函数，例如：</p>
+<pre><code class="language-python">def post_views(post_id):          # step-03
+    return _k('post', post_id, 'views')      # blog:post:42:views
+
+def rank_daily(day):               # step-04
+    return _k('rank', 'views', 'day', day.strftime('%Y%m%d'))</code></pre>
+
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  ROOT["blog"] --> POST["post"]
+  ROOT --> RANK["rank"]
+  ROOT --> USER["user"]
+  ROOT --> MORE["checkin · tag · search · stream ..."]
+  POST --> P42["42"]
+  P42 --> V["views <span>STRING</span>"]
+  P42 --> UV["uv <span>HLL</span>"]
+  P42 --> LK["likers <span>SET</span>"]
+  RANK --> VIEWS["views"]
+  VIEWS --> TOTAL["total <span>ZSET</span>"]
+  VIEWS --> DAY["day:20261030 <span>ZSET</span>"]
+  USER --> U3["3"]
+  U3 --> FOL["following <span>SET</span>"]
+  U3 --> TL["checkin <span>HASH</span>"]
+  </pre></div>
+  <figcaption>图 3　用冒号分层后，RedisInsight 这类工具会把 Key 显示成一棵树</figcaption>
+</figure>
+
+<h2 id="tests"><span class="num">5</span>测试基类：<code>RedisTestCase</code></h2>
+<p>测试直接连真实的 Redis，不用 mock，这样测的就是真实命令的行为。为了不影响开发数据，测试用 db15，并在每个用例开始前清空：</p>
+<pre data-file="Chapter03/mysite/blog/tests/base.py"><code class="language-python" data-include="Chapter03/mysite/blog/tests/base.py">from urllib.parse import urlparse, urlunparse
+
+from django.conf import settings
+from django.test import TestCase, override_settings
+
+from blog.redis_client import get_redis
+
+
+def _with_db(url, db):
+    """把 redis://host:6379/0 换成 redis://host:6379/{db}"""
+    return urlunparse(urlparse(url)._replace(path=f'/{db}'))
+
+
+TEST_REDIS_URL = _with_db(settings.REDIS_URL, 15)
+
+
+@override_settings(REDIS_URL=TEST_REDIS_URL)
+class RedisTestCase(TestCase):
+    """
+    连接真实 Redis 的测试基类。
+
+    使用 db15，避免误删开发数据；每个用例开始前清空，保证用例之间互不影响。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.redis = get_redis()
+        self.redis.flushdb()</code></pre>
+<p>原来的 <code>blog/tests.py</code> 改成了 <code>blog/tests/</code> 包，后面每一章一个测试文件。</p>
+<pre data-file="Chapter03/mysite/blog/tests/test_redis_setup.py"><code class="language-python" data-include="Chapter03/mysite/blog/tests/test_redis_setup.py::RedisSetupTests">class RedisSetupTests(RedisTestCase):
+    def test_uses_test_database(self):
+        kwargs = get_redis().connection_pool.connection_kwargs
+        self.assertEqual(kwargs['db'], 15)
+        self.assertTrue(TEST_REDIS_URL.endswith('/15'))
+
+    def test_ping_and_decode_responses(self):
+        r = get_redis()
+        self.assertTrue(r.ping())
+        r.set('hello', 'redis')
+        # decode_responses=True，返回 str
+        self.assertEqual(r.get('hello'), 'redis')
+
+    def test_get_redis_shares_one_pool(self):
+        self.assertIs(get_redis().connection_pool, get_redis().connection_pool)
+
+    def test_key_prefix(self):
+        self.assertEqual(K._k('post', 1, 'views'), 'blog:post:1:views')
+        with override_settings(REDIS_KEY_PREFIX='demo'):
+            self.assertEqual(K._k('post', 1), 'demo:post:1')</code></pre>
+
+<h2 id="seed"><span class="num">6</span>登录与演示数据</h2>
+<p>点赞、签到、关注都需要知道「当前是谁」，所以接入 Django 自带的登录视图：</p>
+<pre data-file="Chapter03/mysite/mysite/urls.py"><code class="language-python">urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('accounts/', include('django.contrib.auth.urls')),  # 新增：/accounts/login/、/accounts/logout/
+    ...
+]</code></pre>
+<p>Django 5 的退出登录必须用 POST 请求，所以侧边栏里用一个小表单：</p>
+<pre data-file="Chapter03/mysite/blog/templates/blog/base.html"><code class="language-html">&lt;form class="inline-form" action="{% url "logout" %}" method="post"&gt;
+  {% csrf_token %}
+  &lt;input type="submit" value="Log out"&gt;
+&lt;/form&gt;</code></pre>
+<p><code>seed_demo</code> 命令创建 alice / bob / carol 三个作者（密码 <code>redis123</code>）、一个超级用户 admin（密码 <code>admin123</code>）、13 篇带标签的文章。命令可以重复执行。</p>
+
+<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<ol class="steps">
+  <li>
+    <p>启动服务并造数据：</p>
+<pre class="cli"><code><span class="prompt">$ </span>git checkout step-02-redis-setup
+<span class="prompt">$ </span>cd Chapter03 &amp;&amp; docker compose up -d --build web_run
+<span class="prompt">$ </span>docker compose exec web_run python /code/mysite/manage.py seed_demo
+<span class="out">OK: 4 users, 13 posts. Log in as alice / bob / carol with password "redis123", admin with "admin123".</span></code></pre>
+  </li>
+  <li>
+    <p>在 Django shell 里试一下连接：</p>
+<pre class="cli"><code><span class="prompt">$ </span>docker compose exec web_run python /code/mysite/manage.py shell
+<span class="prompt">&gt;&gt;&gt; </span>from blog.redis_client import get_redis
+<span class="prompt">&gt;&gt;&gt; </span>r = get_redis()
+<span class="prompt">&gt;&gt;&gt; </span>r.ping()
+<span class="out">True</span>
+<span class="prompt">&gt;&gt;&gt; </span>r.set('blog:hello', 'world'); r.get('blog:hello')
+<span class="out">'world'</span>          <span class="cmt"># decode_responses=True，所以是 str 而不是 b'world'</span></code></pre>
+  </li>
+  <li>
+    <p>用 redis-cli 看看：</p>
+<pre class="cli"><code><span class="prompt">$ </span>docker compose exec redis redis-cli
+<span class="prompt">127.0.0.1:6379&gt; </span>KEYS blog:*        <span class="cmt"># 只在开发环境用！生产环境请用 SCAN</span>
+<span class="out">1) "blog:hello"</span>
+<span class="prompt">127.0.0.1:6379&gt; </span>INFO keyspace
+<span class="out">db0:keys=1,expires=0,avg_ttl=0</span>
+<span class="prompt">127.0.0.1:6379&gt; </span>CONFIG GET appendonly
+<span class="out">1) "appendonly"
+2) "yes"</span></code></pre>
+  </li>
+  <li>
+    <p>跑测试：</p>
+<pre class="cli"><code><span class="prompt">$ </span>docker compose exec -w /code/mysite web_run python manage.py test blog
+<span class="out">Ran 6 tests in 0.2s
+OK</span></code></pre>
+  </li>
+</ol>
+
+<h2 id="think"><span class="num">8</span>思考题</h2>
+<div class="callout think">
+  <span class="label">想一想</span>
+  <ol>
+    <li>Django 用 gunicorn 开 4 个 worker 进程时，一共有几个连接池？进程 fork 之后能继续用父进程的连接吗？</li>
+    <li>为什么测试用 <code>FLUSHDB</code> 而不是 <code>FLUSHALL</code>？</li>
+    <li>Key 前缀为什么不直接用 Redis 的 db 编号来区分项目？（提示：Redis Cluster 只支持 db0）</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="../02-design.html"><small>上一篇</small>← 系统设计文档</a>
+  <a class="next" href="03-page-views.html"><small>下一篇</small>step-03 文章浏览量 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

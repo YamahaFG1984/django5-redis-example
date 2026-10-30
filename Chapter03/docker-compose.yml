@@ -9,6 +9,7 @@ services:
       DB_USER: 'postgres'
       DB_PASSWORD: 'postgres'
       DB_NAME: 'postgres'
+      REDIS_URL: 'redis://redis:6379/0'
     volumes:
       - .:/code
   web_migrate:
@@ -17,6 +18,7 @@ services:
     command: python /code/mysite/manage.py migrate
     depends_on:
       - db
+      - redis
   web_run:
     extends:
       service: web
@@ -25,6 +27,7 @@ services:
       - "8000:8000"
     depends_on:
       - db
+      - redis
       - web_migrate
     environment:
       PYTHONPATH: "/code/mysite"
@@ -38,3 +41,12 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
+  redis:
+    image: redis:7.4-alpine
+    restart: always
+    # appendonly: 开启 AOF 持久化，每秒刷盘一次，重启后数据还在
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data

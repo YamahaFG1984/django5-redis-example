@@ -95,3 +95,18 @@ input[type=submit] {
     font-size:12px;
     color:#666;
 }
+
+/* user box & inline forms */
+.user-box {
+    font-size:14px;
+}
+.inline-form {
+    display:inline;
+}
+.inline-form input[type=submit] {
+    float:none;
+    clear:none;
+    margin:0 0 0 6px;
+    padding:3px 10px;
+    font-size:12px;
+}
