@@ -26,4 +26,5 @@ urlpatterns = [
     path('ranking/', views.post_ranking, name='post_ranking'),
     path('<int:post_id>/like/', views.post_like, name='post_like'),
     path('likes/', views.my_likes, name='my_likes'),
+    path('checkin/', views.daily_checkin, name='daily_checkin'),
 ]

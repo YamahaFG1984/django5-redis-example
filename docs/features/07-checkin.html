@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>每日签到</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<script src="../assets/doc.js"></script>
+<style>
+  .matrix { display: grid; grid-template-columns: 90px repeat(7, 1fr); gap: 4px; font: 12px "JetBrains Mono", monospace; margin: 8px 0; }
+  .matrix > div { padding: 6px 4px; text-align: center; border-radius: 4px; background: var(--cell-off); color: var(--muted); }
+  .matrix > .h { background: none; color: var(--muted); font-weight: 600; }
+  .matrix > .on { background: var(--cell-on); color: #fff; font-weight: 700; }
+  .matrix > .row-h { background: none; text-align: right; color: var(--t-bitmap); font-weight: 600; }
+  .matrix > .col { outline: 2px dashed var(--t-bitmap); outline-offset: -2px; }
+  .bits { display: flex; flex-wrap: wrap; gap: 2px; font: 12px "JetBrains Mono", monospace; margin: 6px 0; }
+  .bits span { width: 22px; text-align: center; padding: 3px 0; border-radius: 3px; background: var(--cell-off); color: var(--muted); }
+  .bits span.on { background: var(--cell-on); color: #fff; }
+  .bits span.sep { background: none; width: 8px; }
+  .bit-idx { display: flex; flex-wrap: wrap; gap: 2px; font: 10px "JetBrains Mono", monospace; color: var(--muted); }
+  .bit-idx span { width: 22px; text-align: center; }
+  .bit-idx span.sep { width: 8px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../index.html">Django × Redis 实战</a>
+  <nav>
+    <a href="../index.html">首页</a>
+    <a href="../01-prd.html">PRD</a>
+    <a href="../02-design.html">设计文档</a>
+    <a href="../index.html#chapters">功能章节</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="theme-btn" type="button">☾ 深色</button>
+</header>
+
+<div class="layout">
+<aside class="toc"></aside>
+<main>
+
+<section class="hero">
+  <div class="eyebrow">Step 07 · 位图 + 哈希</div>
+  <h1>每日签到：Bitmap 存日历，Hash 存统计</h1>
+  <p class="lead">签到是 Bitmap 的典型场景：每天只有「签了 / 没签」两种状态，正好用 1 个 bit 表示。这一章用两个维度的 Bitmap 分别记录「个人月历」和「全站每天谁签到了」，再用一个 Hash 记录跨月的连续天数和积分。</p>
+  <div class="meta">
+    <span class="pill tag">git checkout step-07-checkin</span>
+    <span class="t bitmap">BITMAP</span><span class="t hash">HASH</span>
+  </div>
+</section>
+
+<h2 id="scene"><span class="num">1</span>场景分析</h2>
+<p>PRD F5：每天只能签到一次；显示本月日历、本月天数、连续天数（跨月要连上）、累计天数和积分；显示今天全站签到人数和最近 7 天全勤人数。</p>
+<h3 id="cost">1.1 存储成本对比</h3>
+<p>假设 100 万用户，统计一年：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方案</th><th>结构</th><th>一年的数据量</th><th>「本月签了几天」</th></tr></thead>
+  <tbody>
+    <tr><td>数据库表 <code>checkin(user_id, date)</code></td><td>每次签到一行</td><td>最多 3.65 亿行</td><td><code>COUNT(*) WHERE …</code></td></tr>
+    <tr><td>Redis SET</td><td>每用户每月一个集合，存日期字符串</td><td>每个元素几十字节</td><td><code>SCARD</code></td></tr>
+    <tr><td><strong>✓ Redis Bitmap</strong></td><td>每用户每月一个 Bitmap，第 N 天对应第 N-1 位</td><td><strong>100 万 × 12 × 4 字节 ≈ 48 MB</strong></td><td><code>BITCOUNT</code></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="bitmap"><span class="num">2</span>Bitmap 是什么</h2>
+<p>Redis 没有单独的 Bitmap 类型，它就是一个 STRING，只是用 <code>SETBIT</code> / <code>GETBIT</code> / <code>BITCOUNT</code> 等命令按位读写。offset 从 0 开始，<strong>offset 0 是第一个字节的最高位</strong>。</p>
+<figure>
+  <div class="diagram" style="text-align:left">
+    <div style="font-size:13px;color:var(--muted)">alice 2026 年 10 月：<code>blog:checkin:1:202610</code>，签到了 21~25、27~29 号</div>
+    <div class="bit-idx"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span class="sep"></span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span>16</span><span class="sep"></span><span>17</span><span>18</span><span>19</span><span>20</span><span>21</span><span>22</span><span>23</span><span>24</span><span class="sep"></span><span>25</span><span>26</span><span>27</span><span>28</span><span>29</span><span>30</span><span>31</span><span>·</span></div>
+    <div class="bits"><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="sep"></span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span>0</span><span class="sep"></span><span>0</span><span>0</span><span>0</span><span>0</span><span class="on">1</span><span class="on">1</span><span class="on">1</span><span class="on">1</span><span class="sep"></span><span class="on">1</span><span>0</span><span class="on">1</span><span class="on">1</span><span class="on">1</span><span>0</span><span>0</span><span>0</span></div>
+    <div class="bit-idx"><span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span class="sep"></span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span class="sep"></span><span>16</span><span>17</span><span>18</span><span>19</span><span>20</span><span>21</span><span>22</span><span>23</span><span class="sep"></span><span>24</span><span>25</span><span>26</span><span>27</span><span>28</span><span>29</span><span>30</span><span>31</span></div>
+    <div style="font-size:12px;color:var(--muted);margin-top:6px">上面一行：日期；中间：bit 值；下面一行：offset。4 个字节 = 32 位，正好放下一个月。</div>
+  </div>
+  <figcaption>图 1　每一位对应一天。<code>SETBIT key 20 1</code> 表示 21 号签到</figcaption>
+</figure>
+
+<h3 id="matrix">2.1 两个维度</h3>
+<p>把「用户 × 日期」看成一个矩阵：按行存是个人月历，按列存是全站某一天的签到情况。两个维度都要查，所以两种 Key 都写：</p>
+<figure>
+  <div class="diagram">
+    <div class="matrix">
+      <div class="h"></div><div class="h">24</div><div class="h">25</div><div class="h">26</div><div class="h">27</div><div class="h">28</div><div class="h">29</div><div class="h col">30</div>
+      <div class="row-h">user 1</div><div class="on">1</div><div class="on">1</div><div>0</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on col">1</div>
+      <div class="row-h">user 2</div><div>0</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on col">1</div>
+      <div class="row-h">user 3</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on">1</div><div class="on col">1</div>
+      <div class="row-h">user 4</div><div>0</div><div>0</div><div>0</div><div>0</div><div>0</div><div>0</div><div class="col">0</div>
+    </div>
+    <p style="font-size:13px;color:var(--muted);margin:8px 0 0">一行 = <code>blog:checkin:{uid}:{yyyymm}</code>（offset = 日期-1）　|　虚线一列 = <code>blog:checkin:day:20261030</code>（offset = 用户 ID）</p>
+  </div>
+  <figcaption>图 2　按行看：用户 3 最近 7 天全勤；按列看：30 号有 3 人签到。7 列按位 AND 后只剩用户 3 是 1</figcaption>
+</figure>
+
+<h3 id="hash">2.2 为什么还要一个 Hash</h3>
+<p>Bitmap 按月拆分，所以跨月的连续签到（10 月 31 日 → 11 月 1 日）只靠 Bitmap 不好算，需要同时读两个月的 Key。另外累计天数、积分这些数字也需要一个地方存。一个用户的这几项统计放在同一个 Hash 里最合适：</p>
+<div class="keys">
+  <div class="rk">
+    <div class="rk-head"><span class="t hash">HASH</span><code>blog:user:1:checkin</code><span class="ttl">TTL ∞</span></div>
+    <div class="rk-body">
+      <div class="row"><span>last_date</span><span>2026-10-29</span></div>
+      <div class="row"><span>streak</span><span>3</span></div>
+      <div class="row"><span>total_days</span><span>8</span></div>
+      <div class="row"><span>points</span><span>8</span></div>
+    </div>
+    <div class="rk-note">field 不多时用 listpack 编码，非常紧凑。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t bitmap">BITMAP</span><code>blog:checkin:1:202610</code><span class="ttl">400d</span></div>
+    <div class="rk-body"><div class="bitmap">
+      <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span>16</span><span>17</span><span>18</span><span>19</span><span>20</span><span class="on">21</span><span class="on">22</span><span class="on">23</span><span class="on">24</span><span class="on">25</span><span>26</span><span class="on">27</span><span class="on">28</span><span class="on">29</span><span class="today">30</span><span>31</span>
+    </div></div>
+    <div class="rk-note">个人月历。</div>
+  </div>
+  <div class="rk">
+    <div class="rk-head"><span class="t bitmap">BITMAP</span><code>blog:checkin:day:20261030</code><span class="ttl">40d</span></div>
+    <div class="rk-body">offset = 用户 ID<br>BITCOUNT → <span class="val" style="color:var(--t-bitmap)">3</span></div>
+    <div class="rk-note">全站当天签到。</div>
+  </div>
+</div>
+<pre data-file="Chapter03/mysite/blog/redis_keys.py（新增部分）"><code class="language-python" data-include="Chapter03/mysite/blog/redis_keys.py::#step-07"># ---------------------------------------------------------------- step-07 签到
+def checkin_month(user_id, day):
+    """BITMAP  用户某月的签到日历：offset = 日期 - 1，TTL 400 天"""
+    return _k('checkin', user_id, day.strftime('%Y%m'))
+
+
+def checkin_daily(day):
+    """BITMAP  某天全站的签到情况：offset = 用户 ID，TTL 40 天"""
+    return _k('checkin', 'day', day.strftime('%Y%m%d'))
+
+
+def checkin_full_week(day):
+    """BITMAP  临时结果：截止 day 连续 7 天都签到的用户（BITOP AND），TTL 60 秒"""
+    return _k('checkin', 'week', day.strftime('%Y%m%d'))
+
+
+def user_checkin_stats(user_id):
+    """HASH  签到统计：total_days / streak / last_date / points"""
+    return _k('user', user_id, 'checkin')</code></pre>
+
+<h2 id="flow"><span class="num">3</span>签到流程</h2>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  participant U as 用户 1
+  participant V as daily_checkin 视图
+  participant R as Redis
+  U->>V: POST /blog/checkin/
+  V->>R: MULTI
+  V->>R: SETBIT blog:checkin:1:202610 29 1
+  V->>R: EXPIRE … 400 天
+  V->>R: SETBIT blog:checkin:day:20261030 1 1
+  V->>R: EXPIRE … 40 天
+  V->>R: EXEC
+  R-->>V: [0, 1, 0, 1]（第一个 0 = 这一位原来是 0）
+  alt 原来是 1
+    V-->>U: 「今天已经签过了」
+  else 原来是 0（今天第一次）
+    V->>R: HGETALL blog:user:1:checkin
+    R-->>V: last_date = 2026-10-29, streak = 3
+    V->>V: 昨天签过 → streak = 4；4 % 7 ≠ 0 → +1 分
+    V->>R: HSET last_date 2026-10-30 streak 4 · HINCRBY total_days 1 · HINCRBY points 1
+    V-->>U: 「连续 4 天，+1 分」
+  end
+  </pre></div>
+  <figcaption>图 3　SETBIT 的返回值就是「之前签过没有」，判断和写入在一条命令里完成</figcaption>
+</figure>
+<div class="callout think">
+  <span class="label">读-改-写为什么没有并发问题</span>
+  <p><code>_update_stats</code> 先 HGETALL 再 HSET，本来是典型的竞态写法。但同一用户同一天只有一个请求能拿到 SETBIT 返回的 0，其他请求在前一步就返回了，所以 SETBIT 相当于起到了锁的作用。</p>
+</div>
+
+<h2 id="read"><span class="num">4</span>读取：BITFIELD、BITCOUNT、BITOP</h2>
+<h3 id="bitfield">4.1 一次读出整月日历</h3>
+<p>逐天 GETBIT 要 31 次调用。<code>BITFIELD key GET u31 0</code> 把从 offset 0 开始的 31 位当作一个无符号整数一次读出来，再在 Python 里拆位：</p>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  A["BITFIELD blog:checkin:1:202610<br/>GET u31 0"] --> B["整数 2012<br/>= 0b000…0000011111011100"]
+  B --> C["第 d 天 = (value >> (31 - d)) & 1"]
+  C --> D["[F, F, …, T, T, T, T, T, F, T, T, T, F, F]"]
+  </pre></div>
+  <figcaption>图 4　offset 0（1 号）是最高位，所以第 d 天要右移 31-d 位</figcaption>
+</figure>
+<div class="callout warn">
+  <span class="label">为什么不用 GET 读整个 Bitmap</span>
+  <p>连接池设置了 <code>decode_responses=True</code>（见第 2 章），GET 会尝试把 4 个字节按 UTF-8 解码成字符串，二进制数据通常会解码失败。BITFIELD 返回的是整数，没有这个问题。</p>
+</div>
+
+<h3 id="streak">4.2 只用 Bitmap 算连续天数</h3>
+<p><code>streak_in_month</code> 读取 1 号到今天的位，从最低位（今天）往高位数连续的 1。缺点有两个：跨月需要再读上个月的 Key；今天还没签到时结果是 0。这正是本项目用 Hash 记录连续天数的原因。两种做法都保留在代码里，可以对比。</p>
+<pre data-file="Chapter03/mysite/blog/services/checkin.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/checkin.py::streak_in_month">def streak_in_month(user_id, day=None):
+    """
+    只用 Bitmap 计算「本月内截止今天」的连续签到天数：
+    取出 1 号到今天的位，从最低位（今天）开始数连续的 1。
+    """
+    day = day or timezone.localdate()
+    value = (
+        get_redis().bitfield(K.checkin_month(user_id, day))
+        .get(f'u{day.day}', 0)
+        .execute()[0]
+    )
+    streak = 0
+    while value &amp; 1:
+        streak += 1
+        value &gt;&gt;= 1
+    return streak</code></pre>
+
+<h3 id="bitop">4.3 最近 7 天全勤的人数</h3>
+<figure>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  D1["day:20261024<br/>1 0 1 0"] --> AND
+  D2["day:20261025<br/>1 1 1 0"] --> AND
+  D3["…"] --> AND
+  D7["day:20261030<br/>1 1 1 0"] --> AND
+  AND(["BITOP AND dest d1 … d7"]) --> R["checkin:week:20261030<br/>0 0 1 0"]
+  R --> C["BITCOUNT → 1"]
+  </pre></div>
+  <figcaption>图 5　按位与：只有 7 天每天都是 1 的位才保留下来。换成 OR 就是「7 天内签过至少一次」</figcaption>
+</figure>
+
+<h2 id="cli"><span class="num">5</span>用 redis-cli 体验</h2>
+<pre class="cli"><code><span class="prompt">&gt; </span>SETBIT demo:cal 20 1
+<span class="out">(integer) 0</span>                 <span class="cmt"># 原来是 0</span>
+<span class="prompt">&gt; </span>SETBIT demo:cal 20 1
+<span class="out">(integer) 1</span>                 <span class="cmt"># 原来已经是 1 → 今天签过了</span>
+<span class="prompt">&gt; </span>SETBIT demo:cal 21 1
+<span class="prompt">&gt; </span>BITCOUNT demo:cal
+<span class="out">(integer) 2</span>
+<span class="prompt">&gt; </span>STRLEN demo:cal
+<span class="out">(integer) 3</span>                 <span class="cmt"># offset 21 落在第 3 个字节</span>
+<span class="prompt">&gt; </span>BITFIELD demo:cal GET u31 0
+<span class="out">1) (integer) 1536</span>          <span class="cmt"># 第 21、22 位为 1：2^(30-20) + 2^(30-21)</span>
+<span class="prompt">&gt; </span>BITPOS demo:cal 1
+<span class="out">(integer) 20</span>                <span class="cmt"># 第一次签到是 21 号</span>
+<span class="prompt">&gt; </span>HSET demo:stats streak 3 last_date 2026-10-29
+<span class="prompt">&gt; </span>HINCRBY demo:stats points 5
+<span class="prompt">&gt; </span>HGETALL demo:stats</code></pre>
+
+<h2 id="code"><span class="num">6</span>代码实现</h2>
+<h3 id="code-checkin">6.1 签到</h3>
+<pre data-file="Chapter03/mysite/blog/services/checkin.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/checkin.py::check_in">def check_in(user_id, day=None):
+    """
+    签到。今天已经签过返回 None；否则返回 {'streak': 连续天数, 'points': 本次获得积分}。
+    """
+    day = day or timezone.localdate()
+    r = get_redis()
+    month_key = K.checkin_month(user_id, day)
+    daily_key = K.checkin_daily(day)
+
+    pipe = r.pipeline()
+    # SETBIT 返回这一位原来的值：0 表示今天第一次签到
+    pipe.setbit(month_key, day.day - 1, 1)
+    pipe.expire(month_key, MONTH_TTL)
+    pipe.setbit(daily_key, user_id, 1)
+    pipe.expire(daily_key, DAILY_TTL)
+    already_checked_in = pipe.execute()[0]
+    if already_checked_in:
+        return None
+    # 同一用户同一天只有一个请求能走到这里，所以下面的读-改-写不会有并发问题
+    return _update_stats(r, user_id, day)</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/checkin.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/checkin.py::_update_stats">def _update_stats(r, user_id, day):
+    key = K.user_checkin_stats(user_id)
+    stats = r.hgetall(key)
+    yesterday = (day - timedelta(days=1)).isoformat()
+    if stats.get('last_date') == yesterday:
+        streak = int(stats['streak']) + 1   # 昨天签过：连续天数 +1（跨月也成立）
+    else:
+        streak = 1                          # 断签了，从 1 重新开始
+    points = POINTS_PER_DAY
+    if streak % STREAK_BONUS_EVERY == 0:
+        points += STREAK_BONUS
+
+    pipe = r.pipeline()
+    pipe.hset(key, mapping={'last_date': day.isoformat(), 'streak': streak})
+    pipe.hincrby(key, 'total_days', 1)
+    pipe.hincrby(key, 'points', points)
+    pipe.execute()
+    return {'streak': streak, 'points': points}</code></pre>
+<h3 id="code-read">6.2 读取</h3>
+<pre data-file="Chapter03/mysite/blog/services/checkin.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/checkin.py::month_calendar">def month_calendar(user_id, day=None):
+    """
+    返回本月每一天是否签到：[True, False, ...]，长度 = 本月天数。
+    BITFIELD GET u{N} 0 把前 N 位当作一个无符号整数一次读出来。
+    """
+    day = day or timezone.localdate()
+    days_in_month = calendar.monthrange(day.year, day.month)[1]
+    value = (
+        get_redis().bitfield(K.checkin_month(user_id, day))
+        .get(f'u{days_in_month}', 0)
+        .execute()[0]
+    )
+    # offset 0（1 号）是最高位，offset N-1（月底）是最低位
+    return [
+        bool(value &gt;&gt; (days_in_month - d) &amp; 1) for d in range(1, days_in_month + 1)
+    ]</code></pre>
+<pre data-file="Chapter03/mysite/blog/services/checkin.py"><code class="language-python" data-include="Chapter03/mysite/blog/services/checkin.py::full_week_count">def full_week_count(day=None):
+    """截止 day 连续 7 天每天都签到的人数：7 个日 Bitmap 按位与。"""
+    day = day or timezone.localdate()
+    r = get_redis()
+    dest = K.checkin_full_week(day)
+    days = [K.checkin_daily(day - timedelta(days=i)) for i in range(7)]
+    pipe = r.pipeline()
+    pipe.bitop('AND', dest, *days)
+    pipe.expire(dest, 60)
+    pipe.bitcount(dest)
+    return pipe.execute()[-1]</code></pre>
+<h3 id="code-view">6.3 视图</h3>
+<pre data-file="Chapter03/mysite/blog/views.py"><code class="language-python" data-include="Chapter03/mysite/blog/views.py::daily_checkin">@login_required
+def daily_checkin(request):
+    user_id = request.user.id
+    if request.method == 'POST':
+        result = checkin.check_in(user_id)
+        if result is None:
+            messages.info(request, 'You have already checked in today.')
+        else:
+            messages.success(
+                request,
+                f"Checked in! {result['streak']} day streak, "
+                f"+{result['points']} point{'s' if result['points'] &gt; 1 else ''}.",
+            )
+        return redirect('blog:daily_checkin')
+
+    today = timezone.localdate()
+    days = checkin.month_calendar(user_id, today)
+    first_weekday = calendar.monthrange(today.year, today.month)[0]
+    return render(
+        request,
+        'blog/checkin.html',
+        {
+            'today': today,
+            'days': [(i, checked) for i, checked in enumerate(days, 1)],
+            'blanks': range(first_weekday),
+            'stats': checkin.get_stats(user_id, today),
+            'month_count': checkin.month_count(user_id, today),
+            'checked_in_today_total': checkin.checked_in_count(today),
+            'full_week_total': checkin.full_week_count(today),
+        },
+    )</code></pre>
+
+<h2 id="lab"><span class="num">7</span>动手实验</h2>
+<ol class="steps">
+  <li>重新执行 <code>seed_demo</code>：alice 会在最近 9 天中签到 8 天（4 天前断签，今天还没签）。</li>
+  <li>用 alice 登录，打开 <code>/blog/checkin/</code>，确认日历和「连续 3 天」，点 Check in 变成连续 4 天。</li>
+  <li>
+    <p>在 redis-cli 中验证：</p>
+<pre class="cli"><code><span class="prompt">&gt; </span>BITCOUNT blog:checkin:1:202610
+<span class="prompt">&gt; </span>BITFIELD blog:checkin:1:202610 GET u31 0
+<span class="prompt">&gt; </span>HGETALL blog:user:1:checkin
+<span class="prompt">&gt; </span>BITCOUNT blog:checkin:day:20261030
+<span class="prompt">&gt; </span>MEMORY USAGE blog:checkin:1:202610</code></pre>
+  </li>
+  <li>再用 bob、carol 分别签到，观察「今日签到人数」的变化。</li>
+</ol>
+
+<h2 id="think"><span class="num">8</span>边界与思考</h2>
+<div class="callout warn">
+  <span class="label">本实现的取舍</span>
+  <ul>
+    <li><strong>按用户 ID 做 offset 的日 Bitmap</strong>：大小由最大的用户 ID 决定。ID 到 1 亿时，即使只有 1 人签到，这个 Key 也有 12.5 MB。ID 很大或者很稀疏时，可以换成 HyperLogLog（只要人数）或 SET。</li>
+    <li><strong>「今天」按 <code>TIME_ZONE</code> 计算</strong>，项目是 UTC。面向国内用户时应改成 <code>Asia/Shanghai</code>，否则早上 8 点前签到会算成前一天。</li>
+    <li><strong>积分只存在 Redis</strong>：积分属于用户资产，生产环境应该写入数据库，或者通过消息队列异步落库。</li>
+  </ul>
+</div>
+<div class="callout think">
+  <span class="label">思考题</span>
+  <ol>
+    <li>「补签卡」功能：允许补签昨天。用 <code>SETBIT</code> 补上昨天的位后，Hash 里的 streak 应该怎么重新计算？</li>
+    <li>「本月第一次签到是几号」可以用哪个命令？「本月最后一次」呢？（提示：<code>BITPOS</code>）</li>
+    <li>如果 <code>_update_stats</code> 要做成完全原子的（比如以后会有并发补签），怎么用 Lua 脚本重写？</li>
+  </ol>
+</div>
+
+<div class="pager">
+  <a href="06-likes.html"><small>上一篇</small>← step-06 点赞</a>
+  <a class="next" href="08-timeline.html"><small>下一篇</small>step-08 关注与时间线 →</a>
+</div>
+
+</main>
+</div>
+</body>
+</html>

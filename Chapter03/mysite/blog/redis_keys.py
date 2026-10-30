@@ -82,3 +82,24 @@ def post_likers(post_id):
 def user_likes(user_id):
     """ZSET  用户点赞过的文章：member = 文章 ID，score = 点赞时间戳"""
     return _k('user', user_id, 'likes')
+
+
+# ---------------------------------------------------------------- step-07 签到
+def checkin_month(user_id, day):
+    """BITMAP  用户某月的签到日历：offset = 日期 - 1，TTL 400 天"""
+    return _k('checkin', user_id, day.strftime('%Y%m'))
+
+
+def checkin_daily(day):
+    """BITMAP  某天全站的签到情况：offset = 用户 ID，TTL 40 天"""
+    return _k('checkin', 'day', day.strftime('%Y%m%d'))
+
+
+def checkin_full_week(day):
+    """BITMAP  临时结果：截止 day 连续 7 天都签到的用户（BITOP AND），TTL 60 秒"""
+    return _k('checkin', 'week', day.strftime('%Y%m%d'))
+
+
+def user_checkin_stats(user_id):
+    """HASH  签到统计：total_days / streak / last_date / points"""
+    return _k('user', user_id, 'checkin')

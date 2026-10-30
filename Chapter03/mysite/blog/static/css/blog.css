@@ -135,3 +135,38 @@ h3 a.more {
     flex:1;
     min-width:200px;
 }
+
+/* check-in calendar */
+.calendar {
+    display:grid;
+    grid-template-columns:repeat(7, 40px);
+    gap:4px;
+    margin:10px 0 20px;
+}
+.calendar span {
+    height:40px;
+    line-height:40px;
+    text-align:center;
+    background:#efefef;
+    color:#666;
+    font-size:13px;
+}
+.calendar .head {
+    background:none;
+    font-weight:bold;
+}
+.calendar .on {
+    background:#00abff;
+    color:#fff;
+}
+.calendar .today {
+    outline:2px solid #333;
+}
+.messages {
+    padding:0;
+    list-style:none;
+}
+.messages li {
+    padding:8px 12px;
+    background:#e6f7ff;
+}

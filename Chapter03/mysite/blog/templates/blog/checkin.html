@@ -1,0 +1,41 @@
+{% extends "blog/base.html" %}
+
+{% block title %}Daily check-in{% endblock %}
+
+{% block content %}
+  <h1>Daily check-in</h1>
+  {% if messages %}
+    <ul class="messages">
+      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    {% if stats.checked_in_today %}
+      <input type="submit" value="Checked in today" disabled>
+    {% else %}
+      <input type="submit" value="Check in">
+    {% endif %}
+  </form>
+
+  <h2 style="clear:both">{{ today|date:"F Y" }}</h2>
+  <div class="calendar">
+    {% for name in "MTWTFSS" %}<span class="head">{{ name }}</span>{% endfor %}
+    {% for _ in blanks %}<span></span>{% endfor %}
+    {% for day, checked in days %}
+      <span class="{% if checked %}on{% endif %}{% if day == today.day %} today{% endif %}">{{ day }}</span>
+    {% endfor %}
+  </div>
+
+  <p class="stats">
+    This month: <strong>{{ month_count }}</strong> day{{ month_count|pluralize }} &middot;
+    Current streak: <strong>{{ stats.streak }}</strong> &middot;
+    Total: <strong>{{ stats.total_days }}</strong> &middot;
+    Points: <strong>{{ stats.points }}</strong>
+  </p>
+  <p class="stats">
+    {{ checked_in_today_total }} reader{{ checked_in_today_total|pluralize }} checked in today &middot;
+    {{ full_week_total }} checked in every day for the last 7 days
+  </p>
+{% endblock %}

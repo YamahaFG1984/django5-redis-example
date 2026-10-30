@@ -1,11 +1,15 @@
+import calendar
+
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
 from django.contrib.postgres.search import TrigramSimilarity
 from django.core.cache import cache
 from django.core.mail import send_mail
-from django.contrib.auth.decorators import login_required
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 from django.views.generic import ListView
 from taggit.models import Tag
@@ -14,7 +18,7 @@ from . import redis_keys
 from .forms import CommentForm, EmailPostForm, SearchForm
 from .models import Post
 from .services import cache as cache_service
-from .services import likes, pageviews, ranking
+from .services import checkin, likes, pageviews, ranking
 from .visitors import get_visitor_id
 
 
@@ -244,3 +248,36 @@ def post_like(request, post_id):
 def my_likes(request):
     posts = likes.liked_posts(request.user.id)
     return render(request, 'blog/post/likes.html', {'posts': posts})
+
+
+@login_required
+def daily_checkin(request):
+    user_id = request.user.id
+    if request.method == 'POST':
+        result = checkin.check_in(user_id)
+        if result is None:
+            messages.info(request, 'You have already checked in today.')
+        else:
+            messages.success(
+                request,
+                f"Checked in! {result['streak']} day streak, "
+                f"+{result['points']} point{'s' if result['points'] > 1 else ''}.",
+            )
+        return redirect('blog:daily_checkin')
+
+    today = timezone.localdate()
+    days = checkin.month_calendar(user_id, today)
+    first_weekday = calendar.monthrange(today.year, today.month)[0]
+    return render(
+        request,
+        'blog/checkin.html',
+        {
+            'today': today,
+            'days': [(i, checked) for i, checked in enumerate(days, 1)],
+            'blanks': range(first_weekday),
+            'stats': checkin.get_stats(user_id, today),
+            'month_count': checkin.month_count(user_id, today),
+            'checked_in_today_total': checkin.checked_in_count(today),
+            'full_week_total': checkin.full_week_count(today),
+        },
+    )

@@ -6,6 +6,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from blog.models import Comment, Post
+from blog.services import checkin
 
 PASSWORD = 'redis123'
 
@@ -83,6 +84,12 @@ class Command(BaseCommand):
                     Comment.objects.create(
                         post=post, name=name, email=email, body=body
                     )
+
+        # step-07 alice 在最近 9 天里签到了 8 天（4 天前断签，今天还没签）
+        today = timezone.localdate()
+        for offset in range(9, 0, -1):
+            if offset != 4:
+                checkin.check_in(users['alice'].id, today - timedelta(days=offset))
 
         self.stdout.write(self.style.SUCCESS(
             f'OK: {User.objects.count()} users, {Post.objects.count()} posts. '
